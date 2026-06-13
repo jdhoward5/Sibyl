@@ -22,6 +22,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Fail fast if the tag doesn't match package.json — electron-builder names
+      # the installer from package.json version, not the tag, so a mismatch would
+      # silently ship a mislabeled artifact.
+      - name: Verify tag matches package.json version
+        shell: pwsh
+        run: |
+          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tag = "${{ github.ref_name }}"
+          if ("v$pkg" -ne $tag) {
+            Write-Error "Tag '$tag' does not match package.json version '$pkg' (expected 'v$pkg')."
+            exit 1
+          }
+          Write-Host "Releasing v$pkg"
+
+      # The self-hosted workspace persists between runs, so wipe stale build
+      # output — otherwise prior tags' installers linger under release/ and get
+      # swept into the upload glob below.
+      - name: Clean previous build output
+        shell: pwsh
+        run: Remove-Item -Recurse -Force release, out -ErrorAction SilentlyContinue
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -29,9 +50,9 @@ jobs:
       - name: Install deps
         run: npm ci
 
-      # Compile the custom b9616 CUDA backend (gemma4 + newer archs). This is
-      # the slow step (~tens of minutes from clean, since npm ci wipes the
-      # previous localBuilds). It no-ops if a valid build is already present.
+      # Compile the custom b9616 CUDA backend (gemma4 + newer archs). The slow
+      # step: npm ci above wiped node_modules (and thus the previous
+      # localBuilds), so this recompiles from clean (~tens of minutes).
       - name: Build custom llama.cpp CUDA backend
         run: npm run rebuild:llama
 
