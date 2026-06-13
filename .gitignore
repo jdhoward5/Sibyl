@@ -17,3 +17,4 @@ build-cuda*.log
 dist*.log
 install.log
 reinstall*.log
+patch-package-error.json.gz
