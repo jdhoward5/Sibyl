@@ -21,6 +21,7 @@
     "lint": "eslint . --ext .ts,.tsx",
     "package": "electron-vite build && electron-builder --win --dir",
     "dist": "electron-vite build && electron-builder --win",
+    "release": "pwsh -File scripts/release.ps1",
     "postinstall": "patch-package",
     "rebuild:llama": "patch-package && node-llama-cpp source download --release b9616 --gpu cuda"
   },

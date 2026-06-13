@@ -83,6 +83,22 @@ npm run dist      # electron-builder → NSIS installer in release/
 `node-llama-cpp`'s native bindings and the compiled llama.cpp binaries are kept
 outside the asar archive (see `electron-builder.yml`) so they load at runtime.
 
+### Cutting a release
+
+Releases are cut **locally**, by hand, on a CUDA-capable dev box — we don't run a
+self-hosted CI runner (that would leave a GitHub-triggered build daemon on a
+machine holding your credentials). [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+still runs typecheck/test/build on every push/PR via a hosted runner.
+
+```bash
+npm run release   # verify + GPU smoke + build installer + publish GitHub pre-release
+```
+
+`scripts/release.ps1` refuses a dirty tree, runs the tests and a real-GPU smoke,
+builds the NSIS installer, tags the commit `v<version>`, and publishes a GitHub
+pre-release with the `.exe` attached (needs an authenticated `gh` CLI). Pass
+`-DryRun` to build without publishing, or `-SkipSmoke` to skip the GPU gate.
+
 ## Security notes
 
 - The renderer runs with `contextIsolation: true` and `nodeIntegration: false`.
