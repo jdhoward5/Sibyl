@@ -39,6 +39,16 @@ class InferenceEngine extends EventEmitter {
   private state: EngineStatus['state'] = 'idle'
   private lastError: string | undefined
   private abort: AbortController | null = null
+  // True while a generate() or compact() is in flight. The engine holds a single
+  // chat session over one context sequence, so only one prompt may run at a time;
+  // this serializes (rejects) re-entrant calls instead of clobbering the abort
+  // controller and racing the shared KV cache.
+  private busy = false
+  // Resolves when the current exclusive operation has fully unwound. unload()
+  // awaits this (after aborting) so GPU resources are never disposed while a
+  // prompt is still running on a worker thread (that crashes with 0xC0000409).
+  private idle: Promise<void> = Promise.resolve()
+  private resolveIdle: (() => void) | null = null
 
   // -- status ---------------------------------------------------------------
 
@@ -69,6 +79,22 @@ class InferenceEngine extends EventEmitter {
     this.state = state
     this.lastError = error
     this.emit('status', await this.status())
+  }
+
+  /** Mark the engine busy and arm the `idle` promise for unload() to await. */
+  private beginExclusive(): void {
+    this.busy = true
+    this.idle = new Promise<void>((resolve) => {
+      this.resolveIdle = resolve
+    })
+  }
+
+  /** Clear busy and let any waiting unload() proceed. */
+  private endExclusive(): void {
+    this.busy = false
+    const resolve = this.resolveIdle
+    this.resolveIdle = null
+    resolve?.()
   }
 
   // -- model lifecycle ------------------------------------------------------
@@ -148,7 +174,18 @@ class InferenceEngine extends EventEmitter {
   }
 
   async unload(): Promise<void> {
+    // Abort any in-flight generation/compaction and WAIT for it to fully unwind
+    // before disposing GPU resources. Disposing the context/model while a prompt
+    // is still running on a libuv worker is a use-after-free that crashes the
+    // process with 0xC0000409.
     this.abort?.abort()
+    if (this.busy) {
+      try {
+        await this.idle
+      } catch {
+        /* the operation reports its own errors; we only need it to have stopped */
+      }
+    }
     this.abort = null
     try {
       this.session = null
@@ -254,21 +291,34 @@ class InferenceEngine extends EventEmitter {
       return
     }
 
-    const settings = await getSettings()
-    const opts: GenerationOptions = {
-      ...DEFAULT_GENERATION_OPTIONS,
-      ...settings.generation,
-      ...optionsOverride
+    // One generation/compaction at a time — see `busy`. The renderer already
+    // disables sending while generating; this is the backstop against a race.
+    if (this.busy) {
+      this.emitEvent({
+        type: 'error',
+        conversationId: conversation.id,
+        messageId: assistantMessageId,
+        error: 'A response is already being generated. Wait for it to finish.'
+      })
+      return
     }
+    this.beginExclusive()
 
-    const session = await this.ensureSession(conversation, userText)
-    this.abort = new AbortController()
-    await this.setState('generating')
-
-    const started = Date.now()
+    let started = 0
     let completionTokens = 0
 
     try {
+      const settings = await getSettings()
+      const opts: GenerationOptions = {
+        ...DEFAULT_GENERATION_OPTIONS,
+        ...settings.generation,
+        ...optionsOverride
+      }
+      const session = await this.ensureSession(conversation, userText)
+      this.abort = new AbortController()
+      await this.setState('generating')
+
+      started = Date.now()
       const responseText = await session.prompt(userText, {
         signal: this.abort.signal,
         stopOnAbortSignal: true,
@@ -341,6 +391,8 @@ class InferenceEngine extends EventEmitter {
       await this.setState('ready')
       // Report the now-exact KV-cache fill so the renderer's meter is accurate.
       void this.emitUsage(conversation)
+      // Release last: unblocks any unload() waiting for this prompt to unwind.
+      this.endExclusive()
     }
   }
 
@@ -434,68 +486,73 @@ class InferenceEngine extends EventEmitter {
    */
   async compact(conversation: Conversation): Promise<CompactionInfo> {
     if (!this.session || !this.model) throw new Error('No model is loaded.')
-    if (this.state === 'generating') throw new Error('Cannot compact while generating.')
-
-    const settings = await getSettings()
-    const keep = Math.max(0, settings.context.keepRecentMessages)
-
-    const live = this.liveMessages(conversation).filter(
-      (m) => m.role !== 'system' && m.content.trim()
-    )
-    const foldCount = live.length - keep
-    if (foldCount <= 0) {
-      throw new Error('Not enough conversation history to compact yet.')
-    }
-    const toFold = live.slice(0, foldCount)
-    const throughMessageId = toFold[toFold.length - 1].id
-
-    const priorSummary = conversation.compaction?.summary?.trim()
-    const transcript = toFold
-      .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.trim()}`)
-      .join('\n\n')
-    const instruction =
-      (priorSummary
-        ? `Existing summary of the conversation so far:\n${priorSummary}\n\n`
-        : '') +
-      'Update (or create) a concise summary of the conversation that preserves all ' +
-      'facts, decisions, names, code, numbers and unresolved questions needed to ' +
-      'continue. Write terse third-person notes. Do not add commentary or address ' +
-      'the user.\n\nConversation excerpt to fold in:\n' +
-      transcript
-
-    // Run the summarization on the shared session, then invalidate it so the
-    // next generate rebuilds from the freshly compacted history.
-    this.abort = new AbortController()
-    await this.setState('generating')
-    let summary = ''
+    // Shares the single chat session with generate(); refuse to run concurrently.
+    if (this.busy) throw new Error('Cannot compact while another operation is in progress.')
+    this.beginExclusive()
     try {
-      this.session.setChatHistory([
-        { type: 'system', text: 'You are a precise conversation summarizer.' }
-      ])
-      summary = (
-        await this.session.prompt(instruction, {
-          signal: this.abort.signal,
-          stopOnAbortSignal: true,
-          temperature: 0.3,
-          maxTokens: 600
-        })
-      ).trim()
+      const settings = await getSettings()
+      const keep = Math.max(0, settings.context.keepRecentMessages)
+
+      const live = this.liveMessages(conversation).filter(
+        (m) => m.role !== 'system' && m.content.trim()
+      )
+      const foldCount = live.length - keep
+      if (foldCount <= 0) {
+        throw new Error('Not enough conversation history to compact yet.')
+      }
+      const toFold = live.slice(0, foldCount)
+      const throughMessageId = toFold[toFold.length - 1].id
+
+      const priorSummary = conversation.compaction?.summary?.trim()
+      const transcript = toFold
+        .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.trim()}`)
+        .join('\n\n')
+      const instruction =
+        (priorSummary
+          ? `Existing summary of the conversation so far:\n${priorSummary}\n\n`
+          : '') +
+        'Update (or create) a concise summary of the conversation that preserves all ' +
+        'facts, decisions, names, code, numbers and unresolved questions needed to ' +
+        'continue. Write terse third-person notes. Do not add commentary or address ' +
+        'the user.\n\nConversation excerpt to fold in:\n' +
+        transcript
+
+      // Run the summarization on the shared session, then invalidate it so the
+      // next generate rebuilds from the freshly compacted history.
+      this.abort = new AbortController()
+      await this.setState('generating')
+      let summary = ''
+      try {
+        this.session.setChatHistory([
+          { type: 'system', text: 'You are a precise conversation summarizer.' }
+        ])
+        summary = (
+          await this.session.prompt(instruction, {
+            signal: this.abort.signal,
+            stopOnAbortSignal: true,
+            temperature: 0.3,
+            maxTokens: 600
+          })
+        ).trim()
+      } finally {
+        this.abort = null
+        this.sessionConversationId = null
+        await this.setState('ready')
+      }
+
+      if (!summary) throw new Error('Summarization produced no output.')
+
+      return {
+        summary,
+        throughMessageId,
+        foldedCount: (conversation.compaction?.foldedCount ?? 0) + toFold.length,
+        originalTokens:
+          this.tokenCount(transcript) + (priorSummary ? this.tokenCount(priorSummary) : 0),
+        summaryTokens: this.tokenCount(summary),
+        compactedAt: new Date().toISOString()
+      }
     } finally {
-      this.abort = null
-      this.sessionConversationId = null
-      await this.setState('ready')
-    }
-
-    if (!summary) throw new Error('Summarization produced no output.')
-
-    return {
-      summary,
-      throughMessageId,
-      foldedCount: (conversation.compaction?.foldedCount ?? 0) + toFold.length,
-      originalTokens:
-        this.tokenCount(transcript) + (priorSummary ? this.tokenCount(priorSummary) : 0),
-      summaryTokens: this.tokenCount(summary),
-      compactedAt: new Date().toISOString()
+      this.endExclusive()
     }
   }
 

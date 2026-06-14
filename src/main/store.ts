@@ -76,7 +76,17 @@ function defaultSettings(): AppSettings {
     context: { ...DEFAULT_CONTEXT_SETTINGS },
     theme: 'dark',
     gpu: 'auto',
+    verifyDownloads: true,
     telemetry: false
+  }
+}
+
+/** Whether OS-backed secure storage is available to encrypt secrets (e.g. the HF token). */
+export function isSecureStorageAvailable(): boolean {
+  try {
+    return safeStorage.isEncryptionAvailable()
+  } catch {
+    return false
   }
 }
 
@@ -136,6 +146,14 @@ export async function setSettings(patch: Partial<AppSettings>): Promise<AppSetti
     context: { ...current.context, ...(patch.context ?? {}) },
     telemetry: false
   }
+
+  // Encrypt the token for persistence. If a non-null token can't be encrypted
+  // (OS secure storage unavailable / keychain error), don't silently drop it:
+  // clear it so memory and disk agree, then report the failure to the caller.
+  const hfTokenEnc = encryptToken(next.hfToken)
+  const tokenStoreFailed = next.hfToken != null && hfTokenEnc == null
+  if (tokenStoreFailed) next.hfToken = null
+
   cachedSettings = next
 
   const persisted: PersistedSettings = {
@@ -145,10 +163,18 @@ export async function setSettings(patch: Partial<AppSettings>): Promise<AppSetti
     context: next.context,
     theme: next.theme,
     gpu: next.gpu,
+    verifyDownloads: next.verifyDownloads,
     telemetry: false,
-    hfTokenEnc: encryptToken(next.hfToken)
+    hfTokenEnc
   }
   await atomicWrite(settingsPath(), JSON.stringify(persisted, null, 2))
+
+  if (tokenStoreFailed) {
+    throw new Error(
+      'Could not store your Hugging Face token securely: this system’s secure ' +
+        'storage (OS keychain) is unavailable, so the token was not saved.'
+    )
+  }
   return next
 }
 

@@ -78,6 +78,8 @@ export interface AppInfo {
   node: string
   platform: string
   modelsDir: string
+  /** Whether the OS keychain is available to securely store secrets (HF token). */
+  secureStorageAvailable: boolean
 }
 
 /**

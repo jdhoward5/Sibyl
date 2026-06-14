@@ -1,6 +1,6 @@
 {
   "name": "oracle",
-  "version": "0.1.0-beta.2",
+  "version": "0.1.0-beta.3",
   "description": "Oracle — a beautiful, secure desktop app for downloading and chatting with Hugging Face models locally.",
   "author": "Oracle",
   "license": "MIT",

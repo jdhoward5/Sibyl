@@ -49,6 +49,8 @@ export interface DownloadProgress {
   speed: number
   /** Estimated seconds remaining, or null when unknown. */
   etaSeconds: number | null
+  /** Progress (0..1) of the post-download checksum/hash pass; null when not hashing. */
+  verifyFraction?: number | null
   error?: string
 }
 
@@ -66,6 +68,20 @@ export interface InstalledModel {
   trainContextLength?: number
   /** Detected chat template family. */
   chatWrapper?: string
+  /**
+   * Whether the download passed the strongest integrity check attempted at
+   * install time. `false`/absent means it couldn't be checked (unknown expected
+   * size, or installed before integrity checks existed) — not that it is
+   * known-bad; a corrupt file is rejected at download time and never reaches the
+   * registry.
+   */
+  verified?: boolean
+  /**
+   * How the download was verified: `'sha256'` = content matched Hugging Face's
+   * published checksum; `'size'` = only the byte count was checked. Absent for
+   * models installed before integrity checks existed.
+   */
+  verifiedBy?: 'size' | 'sha256'
   installedAt: string
 }
 
@@ -177,6 +193,12 @@ export interface AppSettings {
   theme: 'dark' | 'light'
   /** Preferred GPU backend; 'auto' lets the engine decide. */
   gpu: 'auto' | 'cuda' | 'vulkan' | 'cpu'
+  /**
+   * Verify a download's SHA-256 against Hugging Face's published checksum after
+   * it finishes. Slower for large models; when off, only the (cheap) byte-size
+   * check runs. The size check always runs regardless.
+   */
+  verifyDownloads: boolean
   telemetry: false // Oracle never sends telemetry.
 }
 

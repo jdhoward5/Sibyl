@@ -18,6 +18,7 @@ import {
   getConversation,
   getInstalledModel,
   getSettings,
+  isSecureStorageAvailable,
   listConversations,
   listInstalledModels,
   removeInstalledModel,
@@ -141,7 +142,8 @@ export function registerIpc(): void {
       electron: process.versions.electron,
       node: process.versions.node,
       platform: process.platform,
-      modelsDir: settings.modelsDir
+      modelsDir: settings.modelsDir,
+      secureStorageAvailable: isSecureStorageAvailable()
     }
   })
 

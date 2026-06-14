@@ -13,7 +13,15 @@ export function DownloadsBar() {
     <div className="shrink-0 border-t border-oracle-border/60 bg-oracle-surface/80 px-4 py-2 backdrop-blur">
       <div className="mx-auto flex max-w-4xl flex-col gap-2">
         {active.map((d) => {
-          const pct = d.totalBytes > 0 ? (d.receivedBytes / d.totalBytes) * 100 : 0
+          const verifying = d.status === 'verifying'
+          const verifyPct = d.verifyFraction != null ? d.verifyFraction * 100 : null
+          // While verifying, the download bar is full; drive it from hash progress
+          // when we have it, otherwise show it complete with a "Verifying…" label.
+          const pct = verifying
+            ? (verifyPct ?? 100)
+            : d.totalBytes > 0
+              ? (d.receivedBytes / d.totalBytes) * 100
+              : 0
           return (
             <div key={d.id} className="flex items-center gap-3 text-[12px]">
               <DownloadIcon size={15} className="shrink-0 text-oracle-accent" />
@@ -21,8 +29,10 @@ export function DownloadsBar() {
                 <div className="mb-1 flex items-center justify-between gap-2">
                   <span className="truncate font-medium text-oracle-text">{d.filename}</span>
                   <span className="shrink-0 text-oracle-muted">
-                    {d.status === 'verifying'
-                      ? 'Verifying…'
+                    {verifying
+                      ? verifyPct != null
+                        ? `Verifying… ${Math.round(verifyPct)}%`
+                        : 'Verifying…'
                       : d.status === 'queued'
                         ? 'Queued…'
                         : `${formatBytes(d.receivedBytes)} / ${formatBytes(d.totalBytes)} · ${formatSpeed(d.speed)} · ${formatEta(d.etaSeconds)}`}

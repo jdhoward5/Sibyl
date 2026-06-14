@@ -89,7 +89,8 @@ interface TreeEntry {
   type: 'file' | 'directory'
   path: string
   size?: number
-  lfs?: { size?: number }
+  /** `oid` is the file's SHA-256 (hex) for LFS-tracked files like GGUFs. */
+  lfs?: { size?: number; oid?: string }
 }
 
 /** Fetch the GGUF files for a repo with their sizes via the tree API. */
@@ -111,6 +112,31 @@ async function fetchGGUFFiles(repoId: string): Promise<HFGGUFFile[]> {
       multipart: isMultipartGGUF(e.path)
     }))
     .sort((a, b) => (a.size ?? 0) - (b.size ?? 0))
+}
+
+/**
+ * Map of GGUF **basename → lowercase SHA-256** for a repo, from HF's published
+ * LFS checksums. Used to verify downloads. Returns an empty map on any failure
+ * (network/parse/missing) so callers degrade gracefully to size-only checks
+ * rather than blocking a finished download on a flaky metadata call.
+ */
+export async function getFileChecksums(repoId: string): Promise<Map<string, string>> {
+  const map = new Map<string, string>()
+  const url = `${HF_API}/models/${repoId}/tree/main?recursive=true`
+  let entries: TreeEntry[]
+  try {
+    entries = (await hfFetch(url)) as TreeEntry[]
+  } catch {
+    return map
+  }
+  if (!Array.isArray(entries)) return map
+  for (const e of entries) {
+    const oid = e.lfs?.oid
+    if (e.type !== 'file' || !oid || !e.path.toLowerCase().endsWith('.gguf')) continue
+    const base = e.path.split('/').pop()
+    if (base) map.set(base, oid.toLowerCase())
+  }
+  return map
 }
 
 /** Fetch and lightly clean the README for display. */

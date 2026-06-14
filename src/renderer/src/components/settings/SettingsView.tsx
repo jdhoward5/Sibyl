@@ -217,10 +217,25 @@ export function SettingsView() {
               onChange={(v) => update({ generation: { ...gen, maxTokens: v } })} />
           </Section>
 
+          <Section title="Downloads" desc="Integrity checks applied to models you download.">
+            <Toggle
+              label="Verify downloads with SHA-256"
+              desc="Confirm a download matches Hugging Face's published checksum. Slower for large models; the quick size check always runs."
+              checked={settings.verifyDownloads}
+              onChange={(v) => update({ verifyDownloads: v })}
+            />
+          </Section>
+
           <Section
             title="Hugging Face access"
             desc="Optional token for downloading gated or private models. Stored encrypted via your OS keychain."
           >
+            {appInfo && !appInfo.secureStorageAvailable && (
+              <p className="text-[12px] text-amber-400/90">
+                Secure storage (OS keychain) is unavailable on this system, so a token can’t be
+                saved — it would not persist after you restart Oracle.
+              </p>
+            )}
             <div className="flex gap-2">
               <input
                 type="password"

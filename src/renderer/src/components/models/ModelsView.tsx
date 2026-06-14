@@ -55,6 +55,14 @@ export function ModelsView() {
                       {m.paramLabel && <span className="chip">{m.paramLabel}</span>}
                       <span>{formatBytes(m.sizeBytes)}</span>
                       {m.trainContextLength && <span>{(m.trainContextLength / 1024).toFixed(0)}K ctx</span>}
+                      {m.verifiedBy === 'sha256' && (
+                        <span
+                          className="inline-flex items-center gap-1 text-oracle-glow"
+                          title="SHA-256 verified against Hugging Face's published checksum"
+                        >
+                          <CheckIcon size={12} /> Verified
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
