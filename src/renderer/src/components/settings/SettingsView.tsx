@@ -1,85 +1,198 @@
 import { useState } from 'react'
-import { actions, useStore } from '../../store'
-import type { AppSettings } from '@shared/types'
+import { actions, uid, useStore } from '../../store'
+import type { AppSettings, GenerationProfile, SystemPromptPreset } from '@shared/types'
+import { Section, Slider, Toggle } from '../common/controls'
+import { PlusIcon, TrashIcon, CheckIcon, EditIcon } from '../../lib/icons'
 
-function Section({ title, desc, children }: { title: string; desc?: string; children: React.ReactNode }) {
-  return (
-    <section className="card p-5">
-      <h2 className="text-[15px] font-semibold text-oracle-text">{title}</h2>
-      {desc && <p className="mt-0.5 text-[12.5px] text-oracle-muted">{desc}</p>}
-      <div className="mt-4 flex flex-col gap-4">{children}</div>
-    </section>
-  )
-}
+/** Manage reusable system-prompt presets; apply one to the global system prompt. */
+function PromptPresetsSection({ settings }: { settings: AppSettings }) {
+  const presets = settings.promptPresets
+  const [name, setName] = useState('')
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [draftName, setDraftName] = useState('')
 
-function Slider({
-  label,
-  value,
-  min,
-  max,
-  step,
-  onChange,
-  format
-}: {
-  label: string
-  value: number
-  min: number
-  max: number
-  step: number
-  onChange: (v: number) => void
-  format?: (v: number) => string
-}) {
-  return (
-    <div>
-      <div className="mb-1.5 flex items-center justify-between">
-        <label className="text-[13px] text-oracle-text">{label}</label>
-        <span className="font-mono text-[12px] text-oracle-accent">{format ? format(value) : value}</span>
-      </div>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="oracle-range w-full"
-      />
-    </div>
-  )
-}
+  const save = (next: SystemPromptPreset[]): void => void actions.updateSettings({ promptPresets: next })
 
-function Toggle({
-  label,
-  desc,
-  checked,
-  onChange
-}: {
-  label: string
-  desc?: string
-  checked: boolean
-  onChange: (v: boolean) => void
-}) {
+  const add = (): void => {
+    const n = name.trim()
+    if (!n) return
+    save([...presets, { id: uid(), name: n, prompt: settings.load.systemPrompt }])
+    setName('')
+  }
+
   return (
-    <div className="flex items-center justify-between gap-4">
-      <div className="min-w-0">
-        <label className="text-[13px] text-oracle-text">{label}</label>
-        {desc && <p className="mt-0.5 text-[12px] text-oracle-muted">{desc}</p>}
-      </div>
-      <button
-        role="switch"
-        aria-checked={checked}
-        onClick={() => onChange(!checked)}
-        className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
-          checked ? 'bg-oracle-accent' : 'bg-oracle-surface-2'
-        }`}
-      >
-        <span
-          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${
-            checked ? 'left-[18px]' : 'left-0.5'
-          }`}
+    <Section
+      title="Prompt presets"
+      desc="Save the current system prompt as a reusable preset, then apply it here or per-conversation."
+    >
+      {presets.length === 0 && <p className="text-[12.5px] text-oracle-muted">No presets yet.</p>}
+      {presets.map((p) => (
+        <div key={p.id} className="flex items-center gap-2 rounded-lg border border-oracle-border/60 px-3 py-2">
+          {editingId === p.id ? (
+            <input
+              autoFocus
+              value={draftName}
+              onChange={(e) => setDraftName(e.target.value)}
+              onBlur={() => {
+                save(presets.map((x) => (x.id === p.id ? { ...x, name: draftName.trim() || x.name } : x)))
+                setEditingId(null)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                else if (e.key === 'Escape') setEditingId(null)
+              }}
+              className="input h-7 flex-1 px-2 py-0 text-[13px]"
+            />
+          ) : (
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[13px] text-oracle-text">{p.name}</div>
+              <div className="truncate text-[11px] text-oracle-muted" title={p.prompt}>
+                {p.prompt}
+              </div>
+            </div>
+          )}
+          <button
+            onClick={() => actions.updateSettings({ load: { ...settings.load, systemPrompt: p.prompt } })}
+            className="btn-surface shrink-0 px-2.5 py-1 text-[12px]"
+            title="Apply to the global system prompt"
+          >
+            Apply
+          </button>
+          <button
+            onClick={() => save(presets.map((x) => (x.id === p.id ? { ...x, prompt: settings.load.systemPrompt } : x)))}
+            className="btn-ghost shrink-0 px-2 py-1 text-[12px]"
+            title="Update this preset to the current system prompt"
+          >
+            <CheckIcon size={13} />
+          </button>
+          <button
+            onClick={() => {
+              setEditingId(p.id)
+              setDraftName(p.name)
+            }}
+            className="btn-ghost shrink-0 px-2 py-1 text-[12px]"
+            title="Rename"
+          >
+            <EditIcon size={13} />
+          </button>
+          <button
+            onClick={() => save(presets.filter((x) => x.id !== p.id))}
+            className="btn-ghost shrink-0 px-2 py-1 text-[12px] hover:text-red-300"
+            title="Delete"
+          >
+            <TrashIcon size={13} />
+          </button>
+        </div>
+      ))}
+      <div className="flex gap-2">
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && add()}
+          placeholder="Name a new preset from the current system prompt…"
+          className="input flex-1"
         />
-      </button>
-    </div>
+        <button onClick={add} disabled={!name.trim()} className="btn-primary disabled:opacity-40">
+          <PlusIcon size={15} /> Save
+        </button>
+      </div>
+    </Section>
+  )
+}
+
+/** Manage reusable generation-parameter profiles; apply one to the global params. */
+function GenerationProfilesSection({ settings }: { settings: AppSettings }) {
+  const profiles = settings.generationProfiles
+  const [name, setName] = useState('')
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [draftName, setDraftName] = useState('')
+
+  const save = (next: GenerationProfile[]): void =>
+    void actions.updateSettings({ generationProfiles: next })
+
+  const add = (): void => {
+    const n = name.trim()
+    if (!n) return
+    save([...profiles, { id: uid(), name: n, options: { ...settings.generation } }])
+    setName('')
+  }
+
+  return (
+    <Section
+      title="Generation profiles"
+      desc="Named sampling presets. Apply one to the global parameters, or per-conversation."
+    >
+      {profiles.map((p) => (
+        <div key={p.id} className="flex items-center gap-2 rounded-lg border border-oracle-border/60 px-3 py-2">
+          {editingId === p.id ? (
+            <input
+              autoFocus
+              value={draftName}
+              onChange={(e) => setDraftName(e.target.value)}
+              onBlur={() => {
+                save(profiles.map((x) => (x.id === p.id ? { ...x, name: draftName.trim() || x.name } : x)))
+                setEditingId(null)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                else if (e.key === 'Escape') setEditingId(null)
+              }}
+              className="input h-7 flex-1 px-2 py-0 text-[13px]"
+            />
+          ) : (
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[13px] text-oracle-text">{p.name}</div>
+              <div className="truncate font-mono text-[11px] text-oracle-muted">
+                temp {p.options.temperature} · top-p {p.options.topP} · {p.options.maxTokens} tok
+              </div>
+            </div>
+          )}
+          <button
+            onClick={() => actions.updateSettings({ generation: { ...p.options } })}
+            className="btn-surface shrink-0 px-2.5 py-1 text-[12px]"
+            title="Apply to the global generation settings"
+          >
+            Apply
+          </button>
+          <button
+            onClick={() => save(profiles.map((x) => (x.id === p.id ? { ...x, options: { ...settings.generation } } : x)))}
+            className="btn-ghost shrink-0 px-2 py-1 text-[12px]"
+            title="Update this profile to the current generation settings"
+          >
+            <CheckIcon size={13} />
+          </button>
+          <button
+            onClick={() => {
+              setEditingId(p.id)
+              setDraftName(p.name)
+            }}
+            className="btn-ghost shrink-0 px-2 py-1 text-[12px]"
+            title="Rename"
+          >
+            <EditIcon size={13} />
+          </button>
+          <button
+            onClick={() => save(profiles.filter((x) => x.id !== p.id))}
+            className="btn-ghost shrink-0 px-2 py-1 text-[12px] hover:text-red-300"
+            title="Delete"
+          >
+            <TrashIcon size={13} />
+          </button>
+        </div>
+      ))}
+      <div className="flex gap-2">
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && add()}
+          placeholder="Name a new profile from the current settings…"
+          className="input flex-1"
+        />
+        <button onClick={add} disabled={!name.trim()} className="btn-primary disabled:opacity-40">
+          <PlusIcon size={15} /> Save
+        </button>
+      </div>
+    </Section>
   )
 }
 
@@ -216,6 +329,9 @@ export function SettingsView() {
             <Slider label="Max response tokens" value={gen.maxTokens} min={256} max={8192} step={256}
               onChange={(v) => update({ generation: { ...gen, maxTokens: v } })} />
           </Section>
+
+          <GenerationProfilesSection settings={settings} />
+          <PromptPresetsSection settings={settings} />
 
           <Section title="Downloads" desc="Integrity checks applied to models you download.">
             <Toggle

@@ -1,7 +1,8 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { promises as fs } from 'node:fs'
 import type { IpcMainInvokeEvent } from 'electron'
 import { IPC, type AppInfo, type ChatSendRequest } from '@shared/ipc'
+import { buildExport, exportFileBaseName, type ExportFormat } from '@shared/export'
 import type {
   AppSettings,
   ContextUsage,
@@ -109,6 +110,9 @@ export function registerIpc(): void {
     if (!conversation) throw new Error(`Conversation not found: ${conversationId}`)
     return engine.compact(conversation)
   })
+  handle(IPC.chatInvalidate, async (_e, conversationId: string) => {
+    engine.invalidateSession(String(conversationId))
+  })
 
   // --- Context window -----------------------------------------------------
   handle(IPC.contextUsage, async (_e, conversationId: string | null) => {
@@ -128,6 +132,24 @@ export function registerIpc(): void {
   })
   handle(IPC.convDelete, async (_e, id: string) => {
     await deleteConversation(String(id))
+  })
+  handle(IPC.convExport, async (_e, id: string, format: ExportFormat) => {
+    const conversation = await getConversation(String(id))
+    if (!conversation) throw new Error(`Conversation not found: ${id}`)
+    const fmt: ExportFormat =
+      format === 'json' || format === 'text' ? format : 'markdown'
+    const { content, ext } = buildExport(conversation, fmt)
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? null
+    const options: Electron.SaveDialogOptions = {
+      defaultPath: `${exportFileBaseName(conversation)}.${ext}`,
+      filters: [{ name: ext.toUpperCase(), extensions: [ext] }]
+    }
+    const result = win
+      ? await dialog.showSaveDialog(win, options)
+      : await dialog.showSaveDialog(options)
+    if (result.canceled || !result.filePath) return { saved: false }
+    await fs.writeFile(result.filePath, content, 'utf8')
+    return { saved: true, path: result.filePath }
   })
 
   // --- Settings -----------------------------------------------------------

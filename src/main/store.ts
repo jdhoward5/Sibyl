@@ -3,7 +3,11 @@ import { promises as fs } from 'node:fs'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import type { AppSettings, Conversation, InstalledModel } from '@shared/types'
-import { DEFAULT_CONTEXT_SETTINGS, DEFAULT_GENERATION_OPTIONS } from '@shared/types'
+import {
+  DEFAULT_CONTEXT_SETTINGS,
+  DEFAULT_GENERATION_OPTIONS,
+  DEFAULT_GENERATION_PROFILES
+} from '@shared/types'
 
 /**
  * Persistent JSON store rooted in Electron's userData directory.
@@ -87,6 +91,8 @@ function defaultSettings(): AppSettings {
     theme: 'dark',
     gpu: 'auto',
     verifyDownloads: true,
+    promptPresets: [],
+    generationProfiles: DEFAULT_GENERATION_PROFILES.map((p) => ({ ...p, options: { ...p.options } })),
     telemetry: false
   }
 }
@@ -174,6 +180,8 @@ export async function setSettings(patch: Partial<AppSettings>): Promise<AppSetti
     theme: next.theme,
     gpu: next.gpu,
     verifyDownloads: next.verifyDownloads,
+    promptPresets: next.promptPresets,
+    generationProfiles: next.generationProfiles,
     telemetry: false,
     hfTokenEnc
   }

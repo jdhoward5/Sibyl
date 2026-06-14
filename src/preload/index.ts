@@ -41,6 +41,7 @@ const bridge: OracleBridge = {
     send: (req: ChatSendRequest) => ipcRenderer.invoke(IPC.chatSend, req),
     abort: (conversationId) => ipcRenderer.invoke(IPC.chatAbort, conversationId),
     compact: (conversationId) => ipcRenderer.invoke(IPC.chatCompact, conversationId),
+    invalidateSession: (conversationId) => ipcRenderer.invoke(IPC.chatInvalidate, conversationId),
     onEvent: (cb) => subscribe(IPC.chatEvent, cb)
   },
   context: {
@@ -51,7 +52,8 @@ const bridge: OracleBridge = {
     list: () => ipcRenderer.invoke(IPC.convList),
     get: (id) => ipcRenderer.invoke(IPC.convGet, id),
     save: (conversation: Conversation) => ipcRenderer.invoke(IPC.convSave, conversation),
-    delete: (id) => ipcRenderer.invoke(IPC.convDelete, id)
+    delete: (id) => ipcRenderer.invoke(IPC.convDelete, id),
+    export: (id, format) => ipcRenderer.invoke(IPC.convExport, id, format)
   },
   settings: {
     get: () => ipcRenderer.invoke(IPC.settingsGet),

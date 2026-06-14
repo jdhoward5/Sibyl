@@ -16,6 +16,7 @@ import type {
   InstalledModel,
   Result
 } from './types'
+import type { ExportFormat } from './export'
 
 export const IPC = {
   // Hugging Face discovery
@@ -44,6 +45,7 @@ export const IPC = {
   chatAbort: 'chat:abort',
   chatEvent: 'chat:event', // main → renderer streaming event
   chatCompact: 'chat:compact', // summarize older turns to reclaim context
+  chatInvalidate: 'chat:invalidate', // drop the warm session after history edits
 
   // Context window
   contextUsage: 'context:usage', // on-demand snapshot for a conversation
@@ -54,6 +56,7 @@ export const IPC = {
   convGet: 'conv:get',
   convSave: 'conv:save',
   convDelete: 'conv:delete',
+  convExport: 'conv:export', // render + save a conversation to a file via dialog
 
   // Settings
   settingsGet: 'settings:get',
@@ -114,6 +117,12 @@ export interface OracleBridge {
     abort(conversationId: string): Promise<Result<void>>
     /** Summarize older turns of a conversation into a compaction record. */
     compact(conversationId: string): Promise<Result<CompactionInfo>>
+    /**
+     * Drop the engine's warm session for this conversation so the next send
+     * rebuilds history from persisted state. Call after editing/deleting/
+     * regenerating messages.
+     */
+    invalidateSession(conversationId: string): Promise<Result<void>>
     onEvent(cb: (e: GenerationEvent) => void): () => void
   }
   context: {
@@ -126,6 +135,8 @@ export interface OracleBridge {
     get(id: string): Promise<Result<Conversation>>
     save(conversation: Conversation): Promise<Result<void>>
     delete(id: string): Promise<Result<void>>
+    /** Render a conversation and prompt the user to save it to a file. */
+    export(id: string, format: ExportFormat): Promise<Result<{ saved: boolean; path?: string }>>
   }
   settings: {
     get(): Promise<Result<AppSettings>>

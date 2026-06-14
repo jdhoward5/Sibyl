@@ -3,6 +3,7 @@ import type {
   AppSettings,
   ChatMessage,
   Conversation,
+  ConversationOverrides,
   ContextUsage,
   DownloadProgress,
   EngineStatus,
@@ -11,6 +12,7 @@ import type {
   InstalledModel
 } from '@shared/types'
 import type { AppInfo } from '@shared/ipc'
+import type { ExportFormat } from '@shared/export'
 
 export type View = 'chat' | 'discover' | 'models' | 'settings'
 export type SortKey = 'trending' | 'downloads' | 'likes'
@@ -101,7 +103,7 @@ export function getState(): AppState {
   return state
 }
 
-const uid = (): string =>
+export const uid = (): string =>
   typeof crypto !== 'undefined' && 'randomUUID' in crypto
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2) + Date.now().toString(36)
@@ -131,6 +133,49 @@ function updateConversation(id: string, fn: (c: Conversation) => Conversation): 
 
 function persist(conversation: Conversation): void {
   void window.oracle.conversations.save(conversation)
+}
+
+/**
+ * Keep a compaction record only if its fold boundary survives a history edit.
+ * If `throughMessageId` was truncated or deleted away, the summary describes
+ * messages that no longer exist — the engine would then treat every message as
+ * live yet still inject the stale summary (double-counted context). Dropping it
+ * folds the retained messages back into the live history.
+ */
+function survivingCompaction(conv: Conversation, messages: ChatMessage[]): Conversation['compaction'] {
+  const c = conv.compaction
+  return c && messages.some((m) => m.id === c.throughMessageId) ? c : undefined
+}
+
+/**
+ * Replace a conversation's messages, persist, drop the engine's stale warm
+ * session, then re-run generation for `assistantId` from `userText`. Shared by
+ * regenerate() and editAndResend(), which both truncate history and resend.
+ */
+async function runTurn(
+  conv: Conversation,
+  messages: ChatMessage[],
+  userText: string,
+  assistantId: string
+): Promise<void> {
+  const updated: Conversation = {
+    ...conv,
+    modelId: state.engine.modelId,
+    messages,
+    compaction: survivingCompaction(conv, messages),
+    updatedAt: now()
+  }
+  updateConversation(conv.id, () => updated)
+  // Persist the truncated history and invalidate before sending so the engine
+  // rebuilds its session from this new state rather than the stale KV cache.
+  await window.oracle.conversations.save(updated)
+  await window.oracle.chat.invalidateSession(conv.id)
+  const res = await window.oracle.chat.send({
+    conversationId: conv.id,
+    message: userText,
+    assistantMessageId: assistantId
+  })
+  if (!res.ok) toast(res.error ?? 'Failed to send message', 'error')
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +252,7 @@ export const actions = {
             ...c,
             updatedAt: now(),
             messages: c.messages.map((m) =>
-              m.id === e.messageId ? { ...m, stats: e.stats } : m
+              m.id === e.messageId ? { ...m, stats: e.stats, error: undefined } : m
             )
           }
           persist(updated)
@@ -218,9 +263,7 @@ export const actions = {
           const updated = {
             ...c,
             messages: c.messages.map((m) =>
-              m.id === e.messageId
-                ? { ...m, content: m.content || `⚠️ ${e.error}` }
-                : m
+              m.id === e.messageId ? { ...m, error: e.error } : m
             )
           }
           persist(updated)
@@ -380,6 +423,109 @@ export const actions = {
 
   abortGeneration(): void {
     if (state.activeConversationId) void window.oracle.chat.abort(state.activeConversationId)
+  },
+
+  /** Remove a single message from the active conversation. */
+  deleteMessage(messageId: string): void {
+    const conv = activeConversation()
+    if (!conv) return
+    const messages = conv.messages.filter((m) => m.id !== messageId)
+    if (messages.length === conv.messages.length) return
+    const updated = {
+      ...conv,
+      messages,
+      compaction: survivingCompaction(conv, messages),
+      updatedAt: now()
+    }
+    updateConversation(conv.id, () => updated)
+    persist(updated)
+    // History changed under the engine's warm session — force a rebuild next turn.
+    void window.oracle.chat.invalidateSession(conv.id)
+    void actions.refreshContextUsage()
+  },
+
+  /**
+   * Resample an assistant turn: drop it and everything after the user turn it
+   * replied to, then regenerate. Also used as "retry" after a failed generation.
+   */
+  async regenerate(assistantMessageId: string): Promise<void> {
+    if (!state.engine.modelId) {
+      toast('Load a model before regenerating.', 'error')
+      return
+    }
+    if (state.engine.state === 'generating') return
+    const conv = activeConversation()
+    if (!conv) return
+    const idx = conv.messages.findIndex((m) => m.id === assistantMessageId)
+    if (idx < 0) return
+    let userIdx = -1
+    for (let i = idx - 1; i >= 0; i--) {
+      if (conv.messages[i].role === 'user') {
+        userIdx = i
+        break
+      }
+    }
+    if (userIdx < 0) return
+    const userText = conv.messages[userIdx].content
+    const assistantMsg: ChatMessage = { id: uid(), role: 'assistant', content: '', createdAt: now() }
+    await runTurn(conv, [...conv.messages.slice(0, userIdx + 1), assistantMsg], userText, assistantMsg.id)
+  },
+
+  /**
+   * Edit a prior user message, truncate the conversation to that point, and
+   * regenerate from the edited text.
+   */
+  async editAndResend(userMessageId: string, newText: string): Promise<void> {
+    const content = newText.trim()
+    if (!content) return
+    if (!state.engine.modelId) {
+      toast('Load a model before sending.', 'error')
+      return
+    }
+    if (state.engine.state === 'generating') return
+    const conv = activeConversation()
+    if (!conv) return
+    const idx = conv.messages.findIndex((m) => m.id === userMessageId)
+    if (idx < 0 || conv.messages[idx].role !== 'user') return
+    const editedUser: ChatMessage = { ...conv.messages[idx], content, createdAt: now() }
+    const assistantMsg: ChatMessage = { id: uid(), role: 'assistant', content: '', createdAt: now() }
+    await runTurn(conv, [...conv.messages.slice(0, idx), editedUser, assistantMsg], content, assistantMsg.id)
+  },
+
+  /**
+   * Set (or clear) a conversation's per-conversation system-prompt / generation
+   * overrides. Only rebuilds the engine session when the effective system prompt
+   * changed — gen-param tweaks take effect on the next send without a KV rebuild.
+   */
+  async setConversationOverrides(
+    id: string,
+    overrides: ConversationOverrides | undefined
+  ): Promise<void> {
+    const conv = state.conversations.find((c) => c.id === id)
+    if (!conv) return
+    const clean: ConversationOverrides = {}
+    if (overrides?.systemPrompt?.trim()) clean.systemPrompt = overrides.systemPrompt
+    if (overrides?.generation) clean.generation = overrides.generation
+    const next = Object.keys(clean).length ? clean : undefined
+
+    const prevPrompt = conv.overrides?.systemPrompt?.trim() ?? ''
+    const nextPrompt = next?.systemPrompt?.trim() ?? ''
+
+    const updated = { ...conv, overrides: next, updatedAt: now() }
+    updateConversation(id, () => updated)
+    persist(updated)
+    if (prevPrompt !== nextPrompt) await window.oracle.chat.invalidateSession(id)
+    void actions.refreshContextUsage()
+  },
+
+  /** Render the conversation and prompt the user to save it to a file. */
+  async exportConversation(id: string, format: ExportFormat): Promise<void> {
+    const res = await window.oracle.conversations.export(id, format)
+    if (!res.ok) {
+      toast(res.error ?? 'Export failed', 'error')
+      return
+    }
+    if (res.data?.saved) toast('Conversation exported', 'success')
   },
 
   // --- models -------------------------------------------------------------

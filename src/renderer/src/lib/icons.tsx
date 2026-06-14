@@ -140,6 +140,26 @@ export const EditIcon = (p: IconProps) => (
     <path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z" />
   </Icon>
 )
+export const SlidersIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <line x1="4" y1="21" x2="4" y2="14" />
+    <line x1="4" y1="10" x2="4" y2="3" />
+    <line x1="12" y1="21" x2="12" y2="12" />
+    <line x1="12" y1="8" x2="12" y2="3" />
+    <line x1="20" y1="21" x2="20" y2="16" />
+    <line x1="20" y1="12" x2="20" y2="3" />
+    <line x1="1" y1="14" x2="7" y2="14" />
+    <line x1="9" y1="8" x2="15" y2="8" />
+    <line x1="17" y1="16" x2="23" y2="16" />
+  </Icon>
+)
+export const RefreshIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <polyline points="23 4 23 10 17 10" />
+    <polyline points="1 20 1 14 7 14" />
+    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+  </Icon>
+)
 export const ChevronRight = (p: IconProps) => (
   <Icon {...p}>
     <polyline points="9 18 15 12 9 6" />

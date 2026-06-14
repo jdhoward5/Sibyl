@@ -225,8 +225,9 @@ class InferenceEngine extends EventEmitter {
    * system text, plus the compaction summary when older turns have been folded.
    */
   private systemPromptFor(conversation: Conversation, settings: AppSettings): string {
+    const override = conversation.overrides?.systemPrompt?.trim()
     const systemMessage = conversation.messages.find((m) => m.role === 'system')
-    let prompt = systemMessage?.content?.trim() || settings.load.systemPrompt
+    let prompt = override || systemMessage?.content?.trim() || settings.load.systemPrompt
     const summary = conversation.compaction?.summary?.trim()
     if (summary) prompt += `\n\n${SUMMARY_PREFIX}${summary}`
     return prompt
@@ -331,6 +332,7 @@ class InferenceEngine extends EventEmitter {
       const opts: GenerationOptions = {
         ...DEFAULT_GENERATION_OPTIONS,
         ...settings.generation,
+        ...(conversation.overrides?.generation ?? {}),
         ...optionsOverride
       }
       const session = await this.ensureSession(conversation, userText)
@@ -429,6 +431,19 @@ class InferenceEngine extends EventEmitter {
     this.abort?.abort()
   }
 
+  /**
+   * Drop the warm session so the next generate() rebuilds history from the
+   * persisted conversation. Called after the renderer edits/deletes/regenerates
+   * messages — the prior KV cache no longer matches the new history. Safe to call
+   * mid-generation: the in-flight generate already captured its session; this
+   * field is only read by the next ensureSession()/computeUsage().
+   */
+  invalidateSession(conversationId?: string): void {
+    if (!conversationId || this.sessionConversationId === conversationId) {
+      this.sessionConversationId = null
+    }
+  }
+
   // -- context window -------------------------------------------------------
 
   private tokenCount(text: string): number {
@@ -462,7 +477,7 @@ class InferenceEngine extends EventEmitter {
   async computeUsage(conversation: Conversation | null): Promise<ContextUsage> {
     const settings = await getSettings()
     const contextSize = this.contextSize ?? 0
-    const reserve = settings.generation.maxTokens
+    const reserve = conversation?.overrides?.generation?.maxTokens ?? settings.generation.maxTokens
     const { warnThreshold, compactThreshold } = settings.context
 
     let usedTokens = 0

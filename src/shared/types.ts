@@ -92,6 +92,8 @@ export interface ChatMessage {
   createdAt: string
   /** Generation stats attached to assistant messages once complete. */
   stats?: GenerationStats
+  /** Set on an assistant message when its generation failed; drives the retry UI. */
+  error?: string
 }
 
 export interface GenerationStats {
@@ -123,6 +125,18 @@ export interface CompactionInfo {
   compactedAt: string
 }
 
+/**
+ * Per-conversation overrides of the global system prompt / sampling params. Each
+ * field is optional — an omitted field falls back to the global `AppSettings`.
+ * The model is not overridable here; it stays globally selected.
+ */
+export interface ConversationOverrides {
+  /** Replaces the global system prompt for this conversation when set & non-empty. */
+  systemPrompt?: string
+  /** Replaces the global generation options for this conversation when set. */
+  generation?: GenerationOptions
+}
+
 export interface Conversation {
   id: string
   title: string
@@ -132,6 +146,8 @@ export interface Conversation {
   updatedAt: string
   /** Present once older turns have been summarized to save context. */
   compaction?: CompactionInfo
+  /** Per-conversation overrides of the global system prompt / generation params. */
+  overrides?: ConversationOverrides
 }
 
 export interface GenerationOptions {
@@ -153,6 +169,39 @@ export const DEFAULT_GENERATION_OPTIONS: GenerationOptions = {
   maxTokens: 2048,
   repeatPenalty: 1.1
 }
+
+/** A reusable, named system prompt the user can apply globally or per-conversation. */
+export interface SystemPromptPreset {
+  id: string
+  name: string
+  prompt: string
+}
+
+/** A reusable, named bundle of generation options (e.g. "Precise" vs "Creative"). */
+export interface GenerationProfile {
+  id: string
+  name: string
+  options: GenerationOptions
+}
+
+/** Built-in generation profiles shipped out of the box; editable/removable like user ones. */
+export const DEFAULT_GENERATION_PROFILES: GenerationProfile[] = [
+  {
+    id: 'precise',
+    name: 'Precise',
+    options: { temperature: 0.2, topP: 0.7, topK: 20, minP: 0.05, maxTokens: 2048, repeatPenalty: 1.1 }
+  },
+  {
+    id: 'balanced',
+    name: 'Balanced',
+    options: { ...DEFAULT_GENERATION_OPTIONS }
+  },
+  {
+    id: 'creative',
+    name: 'Creative',
+    options: { temperature: 1.0, topP: 0.95, topK: 80, minP: 0.02, maxTokens: 2048, repeatPenalty: 1.05 }
+  }
+]
 
 export interface LoadOptions {
   /** Number of layers to offload to GPU; -1 = auto/max. */
@@ -199,6 +248,10 @@ export interface AppSettings {
    * check runs. The size check always runs regardless.
    */
   verifyDownloads: boolean
+  /** Reusable named system prompts the user can apply globally or per-conversation. */
+  promptPresets: SystemPromptPreset[]
+  /** Reusable named generation-parameter bundles (built-ins + user-defined). */
+  generationProfiles: GenerationProfile[]
   telemetry: false // Oracle never sends telemetry.
 }
 
