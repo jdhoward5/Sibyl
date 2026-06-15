@@ -61,6 +61,13 @@ const bridge: OracleBridge = {
   },
   app: {
     info: () => ipcRenderer.invoke(IPC.appInfo)
+  },
+  update: {
+    check: () => ipcRenderer.invoke(IPC.updateCheck),
+    download: () => ipcRenderer.invoke(IPC.updateDownload),
+    install: () => ipcRenderer.invoke(IPC.updateInstall),
+    status: () => ipcRenderer.invoke(IPC.updateStatus),
+    onEvent: (cb) => subscribe(IPC.updateEvent, cb)
   }
 }
 

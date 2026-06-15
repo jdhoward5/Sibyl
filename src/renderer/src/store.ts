@@ -9,7 +9,8 @@ import type {
   EngineStatus,
   HFModelDetail,
   HFModelSummary,
-  InstalledModel
+  InstalledModel,
+  UpdateStatus
 } from '@shared/types'
 import type { AppInfo } from '@shared/ipc'
 import type { ExportFormat } from '@shared/export'
@@ -44,6 +45,8 @@ export interface AppState {
   compacting: boolean
   /** Live counters for the in-flight assistant turn (drives the streaming tok/s). */
   streamStats: { messageId: string; startedAt: number; tokens: number } | null
+  /** Latest auto-update status, or null before the first snapshot arrives. */
+  update: UpdateStatus | null
   toast: { id: number; kind: 'info' | 'error' | 'success'; message: string } | null
 }
 
@@ -76,6 +79,7 @@ const initialState: AppState = {
   contextUsage: null,
   compacting: false,
   streamStats: null,
+  update: null,
   toast: null
 }
 
@@ -196,14 +200,16 @@ export const actions = {
     if (initialized) return
     initialized = true
 
-    const [settingsRes, infoRes, modelsRes, convRes, statusRes, dlRes] = await Promise.all([
-      window.oracle.settings.get(),
-      window.oracle.app.info(),
-      window.oracle.models.list(),
-      window.oracle.conversations.list(),
-      window.oracle.engine.status(),
-      window.oracle.downloads.list()
-    ])
+    const [settingsRes, infoRes, modelsRes, convRes, statusRes, dlRes, updateRes] =
+      await Promise.all([
+        window.oracle.settings.get(),
+        window.oracle.app.info(),
+        window.oracle.models.list(),
+        window.oracle.conversations.list(),
+        window.oracle.engine.status(),
+        window.oracle.downloads.list(),
+        window.oracle.update.status()
+      ])
 
     const downloads: Record<string, DownloadProgress> = {}
     if (dlRes.ok && dlRes.data) for (const d of dlRes.data) downloads[d.id] = d
@@ -216,6 +222,7 @@ export const actions = {
       conversations: convRes.data ?? [],
       engine: statusRes.data ?? state.engine,
       downloads,
+      update: updateRes.data ?? null,
       activeConversationId: convRes.data?.[0]?.id ?? null
     })
 
@@ -225,6 +232,14 @@ export const actions = {
     void actions.refreshContextUsage()
 
     // Wire live event streams.
+    window.oracle.update.onEvent((s) => {
+      const prev = state.update
+      setState({ update: s })
+      // Announce a ready-to-install update once (the Settings UI shows the button).
+      if (s.state === 'downloaded' && prev?.state !== 'downloaded') {
+        toast(`Update ${s.version ?? ''} downloaded — restart to install`.trim(), 'success')
+      }
+    })
     window.oracle.engine.onStatus((s) => setState({ engine: s }))
     window.oracle.context.onUsage((u) => {
       // Only adopt snapshots for the conversation currently on screen; the engine
@@ -668,6 +683,24 @@ export const actions = {
     } else {
       toast(res.error ?? 'Failed to save settings', 'error')
     }
+  },
+
+  // --- auto-update --------------------------------------------------------
+  async checkForUpdate(): Promise<void> {
+    const res = await window.oracle.update.check()
+    if (res.ok && res.data) setState({ update: res.data })
+    else if (!res.ok) toast(res.error ?? 'Update check failed', 'error')
+  },
+
+  async downloadUpdate(): Promise<void> {
+    const res = await window.oracle.update.download()
+    if (!res.ok) toast(res.error ?? 'Update download failed', 'error')
+  },
+
+  async installUpdate(): Promise<void> {
+    // Quits and relaunches into the installer; nothing to handle on success.
+    const res = await window.oracle.update.install()
+    if (!res.ok) toast(res.error ?? 'Failed to start the installer', 'error')
   },
 
   dismissToast(): void {

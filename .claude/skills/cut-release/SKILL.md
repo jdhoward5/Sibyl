@@ -1,6 +1,6 @@
 ---
 name: cut-release
-description: Cut an Oracle release — bump the version, then build the x64 Windows (NSIS) installer on the GPU box and publish a GitHub pre-release with the .exe attached. Use when asked to cut/ship/publish a release, tag a version, or build the installer. This publishes externally — confirm with the user before the publishing step.
+description: Cut an Oracle release — bump the version, then build the x64 Windows (NSIS) installer on the GPU box and publish a GitHub pre-release with the .exe + auto-updater metadata (latest.yml) attached. Use when asked to cut/ship/publish a release, tag a version, or build the installer. This publishes externally — confirm with the user before the publishing step.
 allowed-tools: Read, Grep, Glob, Bash, PowerShell, Edit
 ---
 
@@ -65,11 +65,15 @@ What it does, in order (`scripts/release.ps1`):
 4. `npm run dist` = `electron-vite build && electron-builder --win` (NSIS x64).
 5. Verify `release/<version>/Oracle-<version>-setup.exe`.
 6. `git tag -a v<version>` (idempotent) and `git push origin v<version>`.
-7. `gh release create v<version> <installer> --prerelease --generate-notes
-   --title "Oracle v<version>"`.
+7. `gh release create v<version> <installer> <latest.yml> [<blockmap>]
+   --prerelease --generate-notes --title "Oracle v<version>"`.
 
-`electron-builder.yml` has `publish: null` on purpose — the script attaches the
-`.exe` to the release via `gh`, it does not auto-publish through electron-builder.
+`electron-builder.yml` sets the GitHub `publish` provider so the build generates
+the auto-updater metadata (`latest.yml` + the packaged `app-update.yml`), but
+`npm run dist` passes `--publish never` so electron-builder generates without
+uploading — the script attaches the assets via `gh` for control over timing.
+**`latest.yml` must be attached** or installed apps can't discover the release;
+the `.exe.blockmap` is attached when present (differential downloads).
 
 ## After publishing
 

@@ -49,4 +49,13 @@ nsis:
   perMachine: false
   allowToChangeInstallationDirectory: true
   deleteAppDataOnUninstall: false
-publish: null
+# Configure the GitHub provider so electron-builder generates the update metadata
+# the in-app auto-updater needs: `latest.yml` (a release asset, uploaded by
+# scripts/release.ps1) and `app-update.yml` (packaged inside the app so it knows
+# which repo to poll). We build with `--publish never` (see the `dist` script) so
+# electron-builder generates these files but never uploads — release.ps1 attaches
+# the assets via `gh` for control over when a release goes public.
+publish:
+  provider: github
+  owner: jdhoward5
+  repo: Oracle

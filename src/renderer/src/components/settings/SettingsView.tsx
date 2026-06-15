@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { actions, uid, useStore } from '../../store'
 import type { AppSettings, GenerationProfile, SystemPromptPreset } from '@shared/types'
+import { formatSpeed } from '@shared/format'
 import { Section, Slider, Toggle } from '../common/controls'
 import { PlusIcon, TrashIcon, CheckIcon, EditIcon } from '../../lib/icons'
 
@@ -196,6 +197,95 @@ function GenerationProfilesSection({ settings }: { settings: AppSettings }) {
           <PlusIcon size={15} /> Save
         </button>
       </div>
+    </Section>
+  )
+}
+
+/** Check for, download, and install app updates from GitHub releases. */
+function UpdatesSection() {
+  const update = useStore((s) => s.update)
+  const appInfo = useStore((s) => s.appInfo)
+  const currentVersion = update?.currentVersion ?? appInfo?.version ?? '—'
+  const state = update?.state ?? 'idle'
+  const busy = state === 'checking' || state === 'downloading'
+
+  return (
+    <Section title="Updates" desc="Oracle checks GitHub for new releases on launch. Downloads are manual.">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[13px] text-oracle-text">Current version</p>
+          <p className="font-mono text-[11px] text-oracle-muted">{currentVersion}</p>
+        </div>
+        {state !== 'available' && state !== 'downloaded' && (
+          <button
+            onClick={() => void actions.checkForUpdate()}
+            disabled={busy}
+            className="btn-surface shrink-0 px-3 py-1.5 text-[13px] disabled:opacity-40"
+          >
+            {state === 'checking' ? 'Checking…' : 'Check for updates'}
+          </button>
+        )}
+      </div>
+
+      {state === 'not-available' && (
+        <p className="text-[12.5px] text-oracle-muted">You’re running the latest version.</p>
+      )}
+
+      {state === 'dev-disabled' && (
+        <p className="text-[12.5px] text-oracle-muted">
+          Updates are only available in the installed app.
+        </p>
+      )}
+
+      {state === 'error' && (
+        <p className="text-[12.5px] text-red-300">{update?.error ?? 'Update check failed.'}</p>
+      )}
+
+      {state === 'available' && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-oracle-accent/40 bg-oracle-accent/10 px-3 py-2.5">
+          <p className="text-[13px] text-oracle-text">
+            Update available: <span className="font-mono text-oracle-glow">{update?.version}</span>
+          </p>
+          <button
+            onClick={() => void actions.downloadUpdate()}
+            className="btn-primary shrink-0 px-3 py-1.5 text-[13px]"
+          >
+            Download update
+          </button>
+        </div>
+      )}
+
+      {state === 'downloading' && (
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center justify-between text-[12px] text-oracle-muted">
+            <span>Downloading {update?.version ?? 'update'}…</span>
+            <span className="font-mono">
+              {Math.round(update?.percent ?? 0)}%
+              {update?.bytesPerSecond ? ` · ${formatSpeed(update.bytesPerSecond)}` : ''}
+            </span>
+          </div>
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-oracle-surface-2">
+            <div
+              className="h-full rounded-full bg-oracle-accent transition-[width]"
+              style={{ width: `${Math.round(update?.percent ?? 0)}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {state === 'downloaded' && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-oracle-accent/40 bg-oracle-accent/10 px-3 py-2.5">
+          <p className="text-[13px] text-oracle-text">
+            <span className="font-mono text-oracle-glow">{update?.version}</span> is ready to install.
+          </p>
+          <button
+            onClick={() => void actions.installUpdate()}
+            className="btn-primary shrink-0 px-3 py-1.5 text-[13px]"
+          >
+            Restart &amp; install
+          </button>
+        </div>
+      )}
     </Section>
   )
 }
@@ -438,6 +528,8 @@ export function SettingsView() {
               </div>
             </div>
           </Section>
+
+          <UpdatesSection />
 
           <Section title="About">
             <div className="grid grid-cols-2 gap-y-1.5 text-[12px] text-oracle-muted">

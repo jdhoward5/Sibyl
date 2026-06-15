@@ -14,6 +14,7 @@ import type {
 import { getModelDetail, searchModels, type SortKey } from './hf'
 import { downloadManager } from './downloads'
 import { engine } from './engine'
+import { updater } from './updater'
 import {
   deleteConversation,
   getConversation,
@@ -169,9 +170,20 @@ export function registerIpc(): void {
     }
   })
 
+  // --- Auto-update --------------------------------------------------------
+  handle(IPC.updateCheck, async () => updater.check())
+  handle(IPC.updateDownload, async () => {
+    await updater.download()
+  })
+  handle(IPC.updateInstall, async () => {
+    updater.install()
+  })
+  handle(IPC.updateStatus, async () => updater.getStatus())
+
   // --- Event forwarding main → renderer -----------------------------------
   downloadManager.on('progress', (p) => broadcast(IPC.downloadProgress, p))
   engine.on('event', (e: GenerationEvent) => broadcast(IPC.chatEvent, e))
   engine.on('status', (s: EngineStatus) => broadcast(IPC.engineStatusEvent, s))
   engine.on('context', (u: ContextUsage) => broadcast(IPC.contextEvent, u))
+  updater.on('status', (s) => broadcast(IPC.updateEvent, s))
 }

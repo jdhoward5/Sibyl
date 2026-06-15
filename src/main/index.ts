@@ -4,6 +4,7 @@ import path from 'node:path'
 import { registerIpc } from './ipc'
 import { engine } from './engine'
 import { disposeLlama } from './llama'
+import { initUpdater, checkForUpdates } from './updater'
 
 // Newer llama.cpp CUDA backends abort with `CUDA error: invalid resource handle`
 // if a context's CUDA streams/events are created on one libuv worker thread and
@@ -238,7 +239,15 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
 app.whenReady().then(() => {
   hardenSession()
   registerIpc()
+  initUpdater()
   createWindow()
+
+  // Check GitHub for a newer release shortly after launch (packaged builds only;
+  // electron-updater is inert when unpackaged). Best-effort — failures surface as
+  // an `error` status in the Updates UI, never as an unhandled rejection.
+  if (app.isPackaged) {
+    setTimeout(() => void checkForUpdates(), 4000)
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

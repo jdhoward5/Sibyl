@@ -14,7 +14,8 @@ import type {
   HFModelDetail,
   HFModelSummary,
   InstalledModel,
-  Result
+  Result,
+  UpdateStatus
 } from './types'
 import type { ExportFormat } from './export'
 
@@ -61,6 +62,13 @@ export const IPC = {
   // Settings
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+
+  // Auto-update
+  updateCheck: 'update:check',
+  updateDownload: 'update:download',
+  updateInstall: 'update:install',
+  updateStatus: 'update:status',
+  updateEvent: 'update:event', // main → renderer status updates
 
   // Misc
   appInfo: 'app:info'
@@ -144,6 +152,17 @@ export interface OracleBridge {
   }
   app: {
     info(): Promise<Result<AppInfo>>
+  }
+  update: {
+    /** Ask the updater to check GitHub for a newer release. */
+    check(): Promise<Result<UpdateStatus>>
+    /** Begin downloading the available update (user-initiated). */
+    download(): Promise<Result<void>>
+    /** Quit and install a downloaded update, relaunching afterwards. */
+    install(): Promise<Result<void>>
+    /** Read the last known update status without triggering a check. */
+    status(): Promise<Result<UpdateStatus>>
+    onEvent(cb: (s: UpdateStatus) => void): () => void
   }
 }
 

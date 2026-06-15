@@ -268,6 +268,44 @@ export interface EngineStatus {
   error?: string
 }
 
+/**
+ * Auto-update state, broadcast main → renderer. A single snapshot the renderer
+ * renders the Updates UI from; mirrors the electron-updater lifecycle.
+ *  - `idle`         no check has run yet this session
+ *  - `checking`     a check is in flight
+ *  - `available`    a newer release exists (not yet downloaded)
+ *  - `not-available` the running build is the latest
+ *  - `downloading`  the installer is being fetched (manual, user-initiated)
+ *  - `downloaded`   the installer is ready; a restart will install it
+ *  - `error`        the last check/download failed
+ *  - `dev-disabled` running unpackaged (dev) — updates are unavailable
+ */
+export interface UpdateStatus {
+  state:
+    | 'idle'
+    | 'checking'
+    | 'available'
+    | 'not-available'
+    | 'downloading'
+    | 'downloaded'
+    | 'error'
+    | 'dev-disabled'
+  /** The running app version (always set). */
+  currentVersion: string
+  /** The available/target release version, when known. */
+  version?: string
+  /** Release notes for the available version, when provided by the feed. */
+  releaseNotes?: string
+  /** ISO release date of the available version, when provided. */
+  releaseDate?: string
+  /** Download progress 0..100 while `state === 'downloading'`. */
+  percent?: number
+  /** Download speed in bytes/sec while `state === 'downloading'`. */
+  bytesPerSecond?: number
+  /** Error message when `state === 'error'`. */
+  error?: string
+}
+
 /** Severity of context-window pressure. */
 export type ContextLevel = 'ok' | 'warn' | 'critical'
 
