@@ -27,7 +27,7 @@ function EmptyState() {
       <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-sibyl-accent to-sibyl-accent-2 text-white shadow-2xl shadow-sibyl-accent/30">
         <SparkIcon size={34} />
       </div>
-      <h2 className="mb-2 text-2xl font-semibold text-sibyl-text">Ask the Sibyl</h2>
+      <h2 className="mb-2 text-2xl font-semibold text-sibyl-text">Ask Sibyl</h2>
       <p className="mb-6 max-w-md text-[14px] leading-relaxed text-sibyl-muted">
         {hasModel
           ? 'Your model is loaded and ready. Type a message below to begin a private, on-device conversation.'
