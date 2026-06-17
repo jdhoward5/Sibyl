@@ -25,7 +25,7 @@ export function ModelDetailDrawer() {
     : []
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end">
+    <div className="no-drag fixed inset-0 z-40 flex justify-end">
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-fade-in" onClick={() => actions.closeModelDetail()} />
       <div className="relative flex h-full w-full max-w-xl animate-fade-in flex-col border-l border-sibyl-border bg-sibyl-surface shadow-2xl">
         {loading ? (

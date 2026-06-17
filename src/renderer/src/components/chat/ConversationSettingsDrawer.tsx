@@ -47,7 +47,7 @@ export function ConversationSettingsDrawer({ conversation, onClose }: Props) {
   const setG = (patch: Partial<GenerationOptions>): void => setGen((g) => ({ ...g, ...patch }))
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end">
+    <div className="no-drag fixed inset-0 z-40 flex justify-end">
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-fade-in" onClick={onClose} />
       <div className="relative flex h-full w-full max-w-md animate-fade-in flex-col border-l border-sibyl-border bg-sibyl-surface shadow-2xl">
         <div className="flex items-center justify-between gap-3 border-b border-sibyl-border/60 p-5">
