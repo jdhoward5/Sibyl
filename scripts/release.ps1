@@ -19,6 +19,9 @@
 param(
   [switch]$SkipSmoke,
   [switch]$DryRun,
+  # Publish as a full/latest GitHub release instead of a pre-release. Use for
+  # stable milestones (e.g. 1.0.0); omit for the usual 0.x-beta.N pre-releases.
+  [switch]$Stable,
   # After a successful publish, keep only this many of the most recent releases
   # online and delete the rest. The in-app updater only reads the newest release's
   # latest.yml, so old releases are just storage. Must be >= 1.
@@ -94,8 +97,9 @@ if (-not (git tag --list $tag)) {
 }
 git push origin $tag
 
-gh release create $tag @assets --prerelease --generate-notes --title "Sibyl $tag"
-Write-Host "==> Published pre-release $tag" -ForegroundColor Green
+$relFlag = if ($Stable) { '--latest' } else { '--prerelease' }
+gh release create $tag @assets $relFlag --generate-notes --title "Sibyl $tag"
+Write-Host "==> Published $(if ($Stable) { 'release' } else { 'pre-release' }) $tag" -ForegroundColor Green
 
 # Auto-prune: keep only the $KeepReleases most recent releases online; delete the
 # rest (release page + installer assets). The in-app updater only consults the
