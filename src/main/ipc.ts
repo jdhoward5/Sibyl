@@ -20,6 +20,7 @@ import {
   getConversation,
   getInstalledModel,
   getSettings,
+  importLocalModel,
   isSecureStorageAvailable,
   listConversations,
   listInstalledModels,
@@ -76,7 +77,9 @@ export function registerIpc(): void {
       await engine.unload()
     }
     const removed = await removeInstalledModel(String(id))
-    if (removed) {
+    // Only delete files Sibyl fetched. A locally-imported model points at the
+    // user's own file, registered in place — deregister it but never unlink it.
+    if (removed && !removed.local) {
       try {
         await fs.unlink(removed.path)
       } catch {
@@ -87,6 +90,19 @@ export function registerIpc(): void {
   handle(IPC.modelsReveal, async (_e, id: string) => {
     const model = await getInstalledModel(String(id))
     if (model) shell.showItemInFolder(model.path)
+  })
+  handle(IPC.modelsImport, async () => {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    const opts = {
+      title: 'Select a GGUF model file',
+      properties: ['openFile' as const],
+      filters: [{ name: 'GGUF models', extensions: ['gguf'] }]
+    }
+    const result = win
+      ? await dialog.showOpenDialog(win, opts)
+      : await dialog.showOpenDialog(opts)
+    if (result.canceled || result.filePaths.length === 0) return null
+    return importLocalModel(result.filePaths[0])
   })
 
   // --- Engine -------------------------------------------------------------

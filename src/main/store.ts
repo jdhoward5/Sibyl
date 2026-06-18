@@ -1,7 +1,9 @@
 import { app, safeStorage } from 'electron'
 import { promises as fs } from 'node:fs'
 import { existsSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import path from 'node:path'
+import { parseParamLabel, parseQuant } from '@shared/format'
 import type { AppSettings, Conversation, InstalledModel, Persona, SystemPromptPreset } from '@shared/types'
 import {
   DEFAULT_CONTEXT_SETTINGS,
@@ -273,6 +275,34 @@ export async function removeInstalledModel(id: string): Promise<InstalledModel |
 export async function getInstalledModel(id: string): Promise<InstalledModel | null> {
   const models = await listInstalledModels()
   return models.find((m) => m.id === id) ?? null
+}
+
+/**
+ * Register a pre-downloaded .gguf the user already has on disk, *in place* (no
+ * copy — these files are often tens of GB). Marked `local` so removal only
+ * deregisters it and never deletes the user's file. The id is derived from the
+ * absolute path so importing the same file twice updates one entry.
+ */
+export async function importLocalModel(filePath: string): Promise<InstalledModel> {
+  const abs = path.resolve(filePath)
+  const stat = await fs.stat(abs)
+  if (!stat.isFile()) throw new Error('That path is not a file.')
+  const filename = path.basename(abs)
+  if (!/\.gguf$/i.test(filename)) throw new Error('Please choose a .gguf model file.')
+
+  const model: InstalledModel = {
+    id: `local-${createHash('sha1').update(abs).digest('hex').slice(0, 12)}`,
+    repoId: 'local',
+    filename,
+    path: abs,
+    sizeBytes: stat.size,
+    quant: parseQuant(filename),
+    paramLabel: parseParamLabel(filename),
+    local: true,
+    installedAt: new Date().toISOString()
+  }
+  await upsertInstalledModel(model)
+  return model
 }
 
 // ---------------------------------------------------------------------------

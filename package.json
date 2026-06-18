@@ -1,6 +1,6 @@
 {
   "name": "sibyl",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Sibyl — a beautiful, secure desktop app for downloading and chatting with Hugging Face models locally.",
   "author": "Sibyl",
   "license": "MIT",

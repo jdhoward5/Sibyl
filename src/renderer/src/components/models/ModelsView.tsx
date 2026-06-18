@@ -1,6 +1,6 @@
 import { actions, useStore } from '../../store'
 import { formatBytes } from '@shared/format'
-import { CheckIcon, TrashIcon, FolderIcon, BoxIcon, CompassIcon } from '../../lib/icons'
+import { CheckIcon, TrashIcon, FolderIcon, BoxIcon, CompassIcon, PlusIcon } from '../../lib/icons'
 
 export function ModelsView() {
   const models = useStore((s) => s.installedModels)
@@ -21,6 +21,9 @@ export function ModelsView() {
                 {models.length} {models.length === 1 ? 'model' : 'models'}
                 {totalBytes > 0 && ` · ${formatBytes(totalBytes)} on disk`}
               </span>
+              <button onClick={() => void actions.importLocalModel()} className="btn-surface h-9" title="Use a .gguf you already have on disk">
+                <PlusIcon size={16} /> Add local model
+              </button>
               <button onClick={() => actions.setView('discover')} className="btn-surface h-9">
                 <CompassIcon size={16} /> Discover
               </button>
@@ -30,10 +33,15 @@ export function ModelsView() {
           {models.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-24 text-center">
               <BoxIcon size={36} className="mb-3 text-sibyl-muted/40" />
-              <p className="mb-4 text-[14px] text-sibyl-muted">No models installed yet.</p>
-              <button onClick={() => actions.setView('discover')} className="btn-primary">
-                <CompassIcon size={16} /> Browse Hugging Face
-              </button>
+              <p className="mb-4 text-[14px] text-sibyl-muted">No models yet — download one, or add a file you already have.</p>
+              <div className="flex items-center gap-2.5">
+                <button onClick={() => actions.setView('discover')} className="btn-primary">
+                  <CompassIcon size={16} /> Browse Hugging Face
+                </button>
+                <button onClick={() => void actions.importLocalModel()} className="btn-surface">
+                  <PlusIcon size={16} /> Add local model
+                </button>
+              </div>
             </div>
           ) : (
             <>
@@ -43,7 +51,7 @@ export function ModelsView() {
                   const isLoaded = m.id === engine.modelId
                   const loading = engine.state === 'loading'
                   const meta = [
-                    m.repoId.split('/')[0],
+                    m.local ? null : m.repoId.split('/')[0],
                     m.quant,
                     formatBytes(m.sizeBytes),
                     m.trainContextLength ? `${(m.trainContextLength / 1024).toFixed(0)}K ctx` : null
@@ -76,6 +84,14 @@ export function ModelsView() {
                               <CheckIcon size={11} /> verified
                             </span>
                           )}
+                          {m.local && (
+                            <span
+                              className="shrink-0 rounded-full border border-sibyl-border px-2 py-px font-mono text-[10px] text-sibyl-muted"
+                              title="Imported from a file on your disk; removing it won't delete the file"
+                            >
+                              local
+                            </span>
+                          )}
                         </div>
                         <div className="mt-1.5 truncate font-mono text-[11px] text-sibyl-muted">{meta}</div>
                       </div>
@@ -93,12 +109,13 @@ export function ModelsView() {
                       </button>
                       <button
                         onClick={() => {
-                          if (confirm(`Delete ${m.filename}? This removes the file from disk.`)) {
-                            void actions.deleteModel(m.id)
-                          }
+                          const msg = m.local
+                            ? `Remove ${m.filename} from your library? The file stays on disk.`
+                            : `Delete ${m.filename}? This removes the file from disk.`
+                          if (confirm(msg)) void actions.deleteModel(m.id)
                         }}
                         className="btn-ghost h-[34px] w-[34px] p-0 hover:text-red-300"
-                        title="Delete model"
+                        title={m.local ? 'Remove from library (keeps the file)' : 'Delete model'}
                       >
                         <TrashIcon size={16} />
                       </button>

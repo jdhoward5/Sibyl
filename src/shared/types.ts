@@ -84,6 +84,12 @@ export interface InstalledModel {
    * models installed before integrity checks existed.
    */
   verifiedBy?: 'size' | 'sha256'
+  /**
+   * True when the model was imported from a file the user already had on disk
+   * (registered in place, not downloaded into the models folder). Removing a
+   * local model only deregisters it — Sibyl never deletes a file it didn't fetch.
+   */
+  local?: boolean
   installedAt: string
 }
 

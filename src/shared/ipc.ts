@@ -34,6 +34,7 @@ export const IPC = {
   modelsList: 'models:list',
   modelsDelete: 'models:delete',
   modelsReveal: 'models:reveal',
+  modelsImport: 'models:import', // pick a pre-downloaded .gguf and register it in place
 
   // Engine / inference
   engineLoad: 'engine:load',
@@ -113,6 +114,11 @@ export interface SibylBridge {
     list(): Promise<Result<InstalledModel[]>>
     delete(id: string): Promise<Result<void>>
     reveal(id: string): Promise<Result<void>>
+    /**
+     * Open a native file picker for a local .gguf and register it in place.
+     * Resolves to the new model, or `null` when the user cancels the dialog.
+     */
+    import(): Promise<Result<InstalledModel | null>>
   }
   engine: {
     load(modelId: string): Promise<Result<EngineStatus>>

@@ -102,7 +102,9 @@ async function run() {
     await page.waitForTimeout(100)
 
     // --- In-chat find (Alpha is the active conversation) ---------------------
-    await page.getByTitle('Find in conversation').click()
+    // Find now lives in the header "⋯" overflow menu.
+    await page.getByTitle('More').click()
+    await page.getByText('Find in conversation', { exact: true }).click()
     const findInput = page.getByPlaceholder('Find in conversation')
     await findInput.waitFor({ timeout: 5000 })
     await findInput.fill('pelican')
@@ -121,8 +123,10 @@ async function run() {
     await page.waitForTimeout(50)
 
     // --- Thread settings drawer: export + overrides --------------------------
-    await page.getByTitle('Thread settings').click()
-    await page.getByText('Thread settings').waitFor({ timeout: 5000 })
+    // Thread settings also lives in the "⋯" overflow menu now.
+    await page.getByTitle('More').click()
+    await page.getByText('Thread settings & export', { exact: true }).click()
+    await page.getByText('Thread settings', { exact: true }).waitFor({ timeout: 5000 })
     const drawer = page.locator('div.z-40').first()
 
     // Export (stub the native save dialog in the main process to a temp file).
@@ -146,14 +150,15 @@ async function run() {
     await drawer.locator('select').last().selectOption({ label: 'Creative' })
     await shot('04-overrides.png')
     await drawer.getByRole('button', { name: 'Save' }).click()
-    await page.getByText('Thread settings').waitFor({ state: 'hidden', timeout: 5000 })
+    await page.getByText('Thread settings', { exact: true }).waitFor({ state: 'hidden', timeout: 5000 })
     await page.waitForTimeout(200)
 
     const alpha = await page.evaluate(() => window.sibyl.conversations.get('e2e-alpha'))
     assert(alpha?.data?.overrides?.systemPrompt === 'You are a terse bird expert.', 'system-prompt override persisted')
     assert(!!alpha?.data?.overrides?.generation, 'generation override persisted')
     // Header should now flag that overrides are active.
-    assert((await page.getByTitle('Thread settings').locator('span').count()) >= 1, 'header shows overrides indicator dot')
+    // The overrides indicator dot now sits on the "⋯" overflow ("More") button.
+    assert((await page.getByTitle('More').locator('span').count()) >= 1, 'header shows overrides indicator dot')
 
     // --- Delete a single message (Beta) -------------------------------------
     await page.getByText('Beta chat about France').click()
@@ -193,6 +198,35 @@ async function run() {
       'stop sequence persisted'
     )
     await shot('05-settings.png')
+
+    // --- Models: import a local .gguf (registered in place; delete keeps file) ---
+    // Stub the native open dialog to return a dummy .gguf (import only stats +
+    // parses the name; it never reads GGUF bytes).
+    const ggufPath = path.join(outDir, 'My-Local-Llama-3-8B-Q4_K_M.gguf')
+    fs.writeFileSync(ggufPath, Buffer.alloc(65536, 7))
+    await app.evaluate(async ({ dialog }, p) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [p] })
+    }, ggufPath)
+    await page.getByText('Models', { exact: true }).click()
+    await page.getByText('Add local model').first().click()
+    await page.getByText('My-Local-Llama-3-8B-Q4_K_M', { exact: true }).waitFor({ timeout: 8000 })
+    const imported = (await page.evaluate(() => window.sibyl.models.list()))?.data?.find((m) =>
+      m.filename.startsWith('My-Local-Llama')
+    )
+    assert(
+      imported?.local === true && imported.path.toLowerCase() === ggufPath.toLowerCase(),
+      'local model registered in place (local:true, path = chosen file)'
+    )
+    assert(imported.quant === 'Q4_K_M' && imported.paramLabel === '8B', 'parsed quant + param from filename')
+    await shot('06-import.png')
+    // Deleting a local model must deregister it but NEVER delete the user's file.
+    await page.evaluate((id) => window.sibyl.models.delete(id), imported.id)
+    await page.waitForTimeout(300)
+    const stillRegistered = (await page.evaluate(() => window.sibyl.models.list()))?.data?.some(
+      (m) => m.id === imported.id
+    )
+    assert(!stillRegistered, 'local model deregistered on delete')
+    assert(fs.existsSync(ggufPath), 'deleting a local model KEEPS the file on disk')
 
     log('✅ ALL UI E2E CHECKS PASSED')
   } catch (err) {

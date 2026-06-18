@@ -29,7 +29,8 @@ const bridge: SibylBridge = {
   models: {
     list: () => ipcRenderer.invoke(IPC.modelsList),
     delete: (id) => ipcRenderer.invoke(IPC.modelsDelete, id),
-    reveal: (id) => ipcRenderer.invoke(IPC.modelsReveal, id)
+    reveal: (id) => ipcRenderer.invoke(IPC.modelsReveal, id),
+    import: () => ipcRenderer.invoke(IPC.modelsImport)
   },
   engine: {
     load: (modelId) => ipcRenderer.invoke(IPC.engineLoad, modelId),

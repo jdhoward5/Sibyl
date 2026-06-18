@@ -689,9 +689,22 @@ export const actions = {
   },
 
   async deleteModel(id: string): Promise<void> {
+    const model = state.installedModels.find((m) => m.id === id)
     await window.sibyl.models.delete(id)
     await actions.refreshModels()
-    toast('Model deleted', 'info')
+    toast(model?.local ? 'Model removed from library (file kept)' : 'Model deleted', 'info')
+  },
+
+  /** Pick a pre-downloaded .gguf from disk and register it (in place). */
+  async importLocalModel(): Promise<void> {
+    const res = await window.sibyl.models.import()
+    if (res.ok && res.data) {
+      await actions.refreshModels()
+      toast(`Imported ${res.data.filename}`, 'success')
+    } else if (!res.ok) {
+      toast(res.error ?? 'Failed to import model', 'error')
+    }
+    // res.ok && data === null → the user cancelled the picker; stay quiet.
   },
 
   revealModel(id: string): void {
