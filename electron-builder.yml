@@ -49,6 +49,10 @@ nsis:
   perMachine: false
   allowToChangeInstallationDirectory: true
   deleteAppDataOnUninstall: false
+  # build/installer.nsh overrides customCheckAppRunning so an auto-update force-
+  # kills a lingering/zombie Sibyl.exe tree instead of dead-ending on the
+  # "Sibyl cannot be closed" prompt. (Auto-included by path, set explicitly here.)
+  include: build/installer.nsh
 # Configure the GitHub provider so electron-builder generates the update metadata
 # the in-app auto-updater needs: `latest.yml` (a release asset, uploaded by
 # scripts/release.ps1) and `app-update.yml` (packaged inside the app so it knows
