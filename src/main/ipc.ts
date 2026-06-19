@@ -188,9 +188,6 @@ export function registerIpc(): void {
 
   // --- Auto-update --------------------------------------------------------
   handle(IPC.updateCheck, async () => updater.check())
-  handle(IPC.updateDownload, async () => {
-    await updater.download()
-  })
   handle(IPC.updateInstall, async () => {
     await updater.install()
   })

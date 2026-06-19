@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { actions, uid, useStore } from '../../store'
 import type { AppSettings, GenerationProfile } from '@shared/types'
 import { ACCENT_THEMES } from '@shared/themes'
-import { formatSpeed } from '@shared/format'
 import { Section, Slider, Toggle } from '../common/controls'
 import { Avatar } from '../persona/Avatar'
 import { PersonaEditor } from '../persona/PersonaEditor'
@@ -144,25 +143,27 @@ function GenerationProfilesSection({ settings }: { settings: AppSettings }) {
   )
 }
 
-/** Check for, download, and install app updates from GitHub releases. */
+/** Check for and apply app updates (Squirrel side-by-side, served from GitHub). */
 function UpdatesSection() {
   const update = useStore((s) => s.update)
   const appInfo = useStore((s) => s.appInfo)
   const currentVersion = update?.currentVersion ?? appInfo?.version ?? '—'
   const state = update?.state ?? 'idle'
-  const busy = state === 'checking' || state === 'downloading'
+  // 'available' and 'downloading' are the same transient stage now — Squirrel
+  // auto-downloads as soon as it finds an update, with no progress to show.
+  const fetching = state === 'checking' || state === 'available' || state === 'downloading'
 
   return (
-    <Section title="Updates" desc="Sibyl checks GitHub for new releases on launch. Downloads are manual.">
+    <Section title="Updates" desc="Sibyl checks GitHub for new releases on launch and downloads them automatically.">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <p className="text-[13px] text-sibyl-text">Current version</p>
           <p className="font-mono text-[11px] text-sibyl-muted">{currentVersion}</p>
         </div>
-        {state !== 'available' && state !== 'downloaded' && (
+        {state !== 'downloaded' && (
           <button
             onClick={() => void actions.checkForUpdate()}
-            disabled={busy}
+            disabled={fetching}
             className="btn-surface shrink-0 px-3 py-1.5 text-[13px] disabled:opacity-40"
           >
             {state === 'checking' ? 'Checking…' : 'Check for updates'}
@@ -175,56 +176,29 @@ function UpdatesSection() {
       )}
 
       {state === 'dev-disabled' && (
-        <p className="text-[12.5px] text-sibyl-muted">
-          Updates are only available in the installed app.
-        </p>
+        <p className="text-[12.5px] text-sibyl-muted">Updates are only available in the installed app.</p>
       )}
 
       {state === 'error' && (
         <p className="text-[12.5px] text-red-300">{update?.error ?? 'Update check failed.'}</p>
       )}
 
-      {state === 'available' && (
-        <div className="flex items-center justify-between gap-3 rounded-lg border border-sibyl-accent/40 bg-sibyl-accent/10 px-3 py-2.5">
-          <p className="text-[13px] text-sibyl-text">
-            Update available: <span className="font-mono text-sibyl-glow">{update?.version}</span>
-          </p>
-          <button
-            onClick={() => void actions.downloadUpdate()}
-            className="btn-primary shrink-0 px-3 py-1.5 text-[13px]"
-          >
-            Download update
-          </button>
-        </div>
-      )}
-
-      {state === 'downloading' && (
-        <div className="flex flex-col gap-1.5">
-          <div className="flex items-center justify-between text-[12px] text-sibyl-muted">
-            <span>Downloading {update?.version ?? 'update'}…</span>
-            <span className="font-mono">
-              {Math.round(update?.percent ?? 0)}%
-              {update?.bytesPerSecond ? ` · ${formatSpeed(update.bytesPerSecond)}` : ''}
-            </span>
-          </div>
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-sibyl-surface-2">
-            <div
-              className="h-full rounded-full bg-sibyl-accent transition-[width]"
-              style={{ width: `${Math.round(update?.percent ?? 0)}%` }}
-            />
-          </div>
-        </div>
+      {(state === 'available' || state === 'downloading') && (
+        <p className="text-[12.5px] text-sibyl-muted">Downloading the latest update…</p>
       )}
 
       {state === 'downloaded' && (
         <div className="flex items-center justify-between gap-3 rounded-lg border border-sibyl-accent/40 bg-sibyl-accent/10 px-3 py-2.5">
           <p className="text-[13px] text-sibyl-text">
-            <span className="font-mono text-sibyl-glow">{update?.version}</span> is ready to install.
+            {update?.version ? (
+              <>
+                <span className="font-mono text-sibyl-glow">{update.version}</span> is ready.
+              </>
+            ) : (
+              'An update is ready.'
+            )}
           </p>
-          <button
-            onClick={() => void actions.installUpdate()}
-            className="btn-primary shrink-0 px-3 py-1.5 text-[13px]"
-          >
+          <button onClick={() => void actions.installUpdate()} className="btn-primary shrink-0 px-3 py-1.5 text-[13px]">
             Restart &amp; install
           </button>
         </div>

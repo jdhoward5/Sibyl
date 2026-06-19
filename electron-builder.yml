@@ -16,6 +16,11 @@ files:
   #  - arm64 prebuilts are useless on an x64 build
   - "!**/node_modules/@node-llama-cpp/win-x64-cuda-ext/**"
   - "!**/node_modules/@node-llama-cpp/win-arm64/**"
+  # The top-level llama.cpp *source* checkout (~153 MB) that `rebuild:llama`
+  # downloads to build from — only the compiled `localBuilds/*/Release` output is
+  # needed at runtime. Also has very deep paths (its tools/ui Svelte tree) that
+  # blow past Windows' 260-char MAX_PATH when packed into a Squirrel nupkg.
+  - "!**/node_modules/node-llama-cpp/llama/llama.cpp/**"
   # Keep only the custom build's runtime output: Release/ holds the .node + the
   # DLLs colocated beside it (this is the dir node-llama-cpp loads), and
   # buildDone.status + lastBuild.json are needed for it to resolve the build.
@@ -37,29 +42,10 @@ files:
 asarUnpack:
   - node_modules/node-llama-cpp/**/*
   - node_modules/@node-llama-cpp/**/*
+# We build only the unpacked app dir here (`electron-builder --win --dir`);
+# `scripts/squirrel.mjs` (electron-winstaller) wraps it into the Squirrel.Windows
+# installer + update package. So no NSIS/installer target, and no electron-updater
+# `publish` provider — auto-update is Electron's native (Squirrel) updater reading
+# straight from GitHub releases (see src/main/updater.ts).
 win:
   icon: build/icon.ico
-  target:
-    - target: nsis
-      arch:
-        - x64
-  artifactName: ${productName}-${version}-setup.${ext}
-nsis:
-  oneClick: false
-  perMachine: false
-  allowToChangeInstallationDirectory: true
-  deleteAppDataOnUninstall: false
-  # build/installer.nsh overrides customCheckAppRunning so an auto-update force-
-  # kills a lingering/zombie Sibyl.exe tree instead of dead-ending on the
-  # "Sibyl cannot be closed" prompt. (Auto-included by path, set explicitly here.)
-  include: build/installer.nsh
-# Configure the GitHub provider so electron-builder generates the update metadata
-# the in-app auto-updater needs: `latest.yml` (a release asset, uploaded by
-# scripts/release.ps1) and `app-update.yml` (packaged inside the app so it knows
-# which repo to poll). We build with `--publish never` (see the `dist` script) so
-# electron-builder generates these files but never uploads — release.ps1 attaches
-# the assets via `gh` for control over when a release goes public.
-publish:
-  provider: github
-  owner: jdhoward5
-  repo: Sibyl

@@ -64,9 +64,8 @@ export const IPC = {
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
 
-  // Auto-update
+  // Auto-update (Squirrel auto-downloads, so there's no manual download step)
   updateCheck: 'update:check',
-  updateDownload: 'update:download',
   updateInstall: 'update:install',
   updateStatus: 'update:status',
   updateEvent: 'update:event', // main → renderer status updates
@@ -160,11 +159,9 @@ export interface SibylBridge {
     info(): Promise<Result<AppInfo>>
   }
   update: {
-    /** Ask the updater to check GitHub for a newer release. */
+    /** Check GitHub for a newer release; Squirrel auto-downloads if one exists. */
     check(): Promise<Result<UpdateStatus>>
-    /** Begin downloading the available update (user-initiated). */
-    download(): Promise<Result<void>>
-    /** Quit and install a downloaded update, relaunching afterwards. */
+    /** Apply a downloaded update (swaps side-by-side on quit) and relaunch. */
     install(): Promise<Result<void>>
     /** Read the last known update status without triggering a check. */
     status(): Promise<Result<UpdateStatus>>

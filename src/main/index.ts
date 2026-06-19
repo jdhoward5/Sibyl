@@ -1,9 +1,18 @@
 import { app, BrowserWindow, session, shell } from 'electron'
+import squirrelStartup from 'electron-squirrel-startup'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { registerIpc } from './ipc'
 import { teardownGpu } from './shutdown'
 import { initUpdater, checkForUpdates } from './updater'
+
+// Squirrel.Windows fires the installer/uninstaller by relaunching the app with
+// `--squirrel-{install,updated,uninstall,obsolete}`. electron-squirrel-startup
+// creates/removes the Start Menu + Desktop shortcuts for those events and tells
+// us to quit immediately. Must run before anything else (incl. the instance lock).
+if (squirrelStartup) {
+  app.quit()
+}
 
 // Newer llama.cpp CUDA backends abort with `CUDA error: invalid resource handle`
 // if a context's CUDA streams/events are created on one libuv worker thread and

@@ -352,10 +352,6 @@ export interface UpdateStatus {
   releaseNotes?: string
   /** ISO release date of the available version, when provided. */
   releaseDate?: string
-  /** Download progress 0..100 while `state === 'downloading'`. */
-  percent?: number
-  /** Download speed in bytes/sec while `state === 'downloading'`. */
-  bytesPerSecond?: number
   /** Error message when `state === 'error'`. */
   error?: string
 }

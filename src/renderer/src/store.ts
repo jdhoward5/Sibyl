@@ -782,15 +782,10 @@ export const actions = {
     else if (!res.ok) toast(res.error ?? 'Update check failed', 'error')
   },
 
-  async downloadUpdate(): Promise<void> {
-    const res = await window.sibyl.update.download()
-    if (!res.ok) toast(res.error ?? 'Update download failed', 'error')
-  },
-
   async installUpdate(): Promise<void> {
-    // Quits and relaunches into the installer; nothing to handle on success.
+    // Swaps to the downloaded side-by-side version on quit, then relaunches.
     const res = await window.sibyl.update.install()
-    if (!res.ok) toast(res.error ?? 'Failed to start the installer', 'error')
+    if (!res.ok) toast(res.error ?? 'Failed to install the update', 'error')
   },
 
   dismissToast(): void {

@@ -1,6 +1,6 @@
 {
   "name": "sibyl",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "Sibyl — a beautiful, secure desktop app for downloading and chatting with Hugging Face models locally.",
   "author": "Sibyl",
   "license": "MIT",
@@ -21,13 +21,13 @@
     "test:e2e": "node scripts/ui-e2e.mjs",
     "lint": "eslint . --ext .ts,.tsx",
     "package": "electron-vite build && electron-builder --win --dir",
-    "dist": "electron-vite build && electron-builder --win --publish never",
+    "dist": "npm run package && node scripts/squirrel.mjs",
     "release": "pwsh -File scripts/release.ps1",
     "postinstall": "patch-package",
     "rebuild:llama": "patch-package && node-llama-cpp source download --release b9616 --gpu cuda"
   },
   "dependencies": {
-    "electron-updater": "^6.3.9",
+    "electron-squirrel-startup": "^1.0.1",
     "node-llama-cpp": "^3.3.0"
   },
   "devDependencies": {
@@ -41,6 +41,7 @@
     "electron": "^42.4.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^3.1.0",
+    "electron-winstaller": "^5.4.0",
     "eslint": "^8.57.1",
     "patch-package": "^8.0.1",
     "playwright-core": "^1.60.0",
