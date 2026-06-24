@@ -57,7 +57,7 @@ run('npm', ['run', 'dist:mac'])
 
 const outDir = path.join(root, 'release', version)
 const dmg = path.join(outDir, `Sibyl-${version}-arm64.dmg`)
-const zip = path.join(outDir, `Sibyl-${version}-arm64-mac.zip`)
+const zip = path.join(outDir, `Sibyl-${version}-arm64.zip`)
 const assets = [dmg, zip].filter((f) => existsSync(f))
 if (!existsSync(dmg)) {
   throw new Error(`Expected DMG not found: ${dmg}`)
