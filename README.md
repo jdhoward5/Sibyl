@@ -81,15 +81,20 @@ GPU and streams a response — printing the active backend and tokens/sec.
 
 ```bash
 # Windows: Squirrel.Windows installer + update package in release/<version>/squirrel/
+npm run rebuild:llama   # custom from-source llama.cpp b9616 CUDA backend
 npm run dist
 
 # macOS: unsigned .dmg + .zip (Apple Silicon) in release/<version>/
-npm run make-icon:mac   # one-time: (re)generate build/icon.icns
+npm run make-icon:mac      # one-time: (re)generate build/icon.icns
+npm run rebuild:llama:mac  # custom from-source llama.cpp b9616 Metal backend
 npm run dist:mac
 ```
 
 `node-llama-cpp`'s native bindings and the compiled llama.cpp binaries are kept
-outside the asar archive (see `electron-builder.yml`) so they load at runtime.
+outside the asar archive (see `electron-builder.yml`) so they load at runtime. The
+custom **b9616** backend (CUDA on Windows, Metal on macOS) adds newer model
+architectures — e.g. **gemma4** — that the prebuilt binaries don't yet support; it's
+regenerated from source by the `rebuild:llama*` scripts above (not committed to git).
 
 The Windows build uses **Squirrel.Windows** (side-by-side installs, applied on
 restart — never overwriting the running binary). The macOS build is an **unsigned**

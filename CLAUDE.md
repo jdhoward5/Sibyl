@@ -96,23 +96,28 @@ locally via `node-llama-cpp`. Stack: electron-vite + React + TS + Tailwind.
 ## macOS build (Metal, unsigned, arm64)
 - The app is **cross-platform**; platform-specific code branches on
   `process.platform` (`'win32'` vs `'darwin'`). Things gated to Windows: the
-  custom `lastBuild` CUDA backend (`llama.ts`), the `UV_THREADPOOL_SIZE=1` libuv
-  pin and `titleBarOverlay` (`index.ts`), and the Squirrel `autoUpdater`
-  (`updater.ts`). macOS gets: the prebuilt **Metal** backend, native traffic
-  lights (`trafficLightPosition`, the renderer `TitleBar` pads the **left**), and
-  an `'unsupported'` update state. The renderer reads `appInfo.platform` to pick
-  GPU options (Auto/Metal/CPU) and the updates UI.
-- Backend: ships node-llama-cpp's prebuilt **`@node-llama-cpp/mac-arm64-metal`**
-  (Metal GPU on Apple Silicon) + CPU fallback. `llama.ts` resolves it via the
-  normal `getLlama({ gpu })` path — **no** custom local build on mac. NOTE: the
-  prebuilt is **b8390**, so (like the prebuilt Windows path) it can't load the
-  newest archs, e.g. `gemma4` → `unknown model architecture`. A from-source Metal
-  b9616 build (`node-llama-cpp source download --release b9616 --gpu metal`, needs
-  Xcode CLT + CMake) would close that gap but isn't shipped yet.
+  `UV_THREADPOOL_SIZE=1` libuv pin and `titleBarOverlay` (`index.ts`), and the
+  Squirrel `autoUpdater` (`updater.ts`). macOS gets: the custom **Metal** backend,
+  native traffic lights (`trafficLightPosition`, the renderer `TitleBar` pads the
+  **left**), and an `'unsupported'` update state. The renderer reads
+  `appInfo.platform` to pick GPU options (Auto/Metal/CPU) and the updates UI.
+- Backend: like Windows (CUDA), macOS ships a **custom from-source llama.cpp
+  b9616 Metal build** under `llama/localBuilds/mac-arm64-metal-release-b9616`,
+  which adds newer architectures (e.g. **gemma4**) the prebuilt b8390 lacks.
+  `llama.ts` prefers it via `getLlama('lastBuild')` for metal/auto (the
+  `preferLocalBuild` branch now covers `win32`+cuda **and** `darwin`+metal); it
+  falls back to the prebuilt **`@node-llama-cpp/mac-arm64-metal`** (Metal) / CPU
+  if the local build is absent. Build it with `npm run rebuild:llama:mac` (see
+  "Rebuilding the llama backend"). The same C++17/`llama-common`/
+  `common_cpu_get_num_math` patch the CUDA build needs applies to Metal.
 - Build: `npm run make-icon:mac` (one-time — generates `build/icon.icns` from the
-  brand mark via an offscreen Electron render) then `npm run dist:mac` =
-  `electron-vite build && electron-builder --mac --arm64`. Output:
-  `release/<v>/Sibyl-<v>-arm64.dmg` + `.zip` (Apple Silicon only).
+  brand mark via an offscreen Electron render); `npm run rebuild:llama:mac` (the
+  custom b9616 Metal build — **not** in git, regenerate after `npm install`); then
+  `npm run dist:mac` = `electron-vite build && electron-builder --mac --arm64`.
+  Output: `release/<v>/Sibyl-<v>-arm64.dmg` + `.zip` (Apple Silicon only). Packaging
+  ships only the build's `Release/` output (the `.node` + colocated `.dylib`s incl.
+  `lib{ggml,llama}.metal.b9616.dylib`) + `buildDone.status`, dropping the ~hundreds
+  of MB from-source tree — same `localBuilds/*` trims as Windows.
 - **Unsigned** (`mac.identity: null`), matching the unsigned Windows build. No
   Apple Developer ID → no signing/notarization → Gatekeeper quarantines the
   download: first launch needs **right-click → Open** (or
@@ -123,23 +128,32 @@ locally via `node-llama-cpp`. Stack: electron-vite + React + TS + Tailwind.
 - Release: `npm run release:mac` (`scripts/release-mac.mjs`) — verify + build +
   publish the dmg/zip to the `v<version>` GitHub release (`--dry-run` to skip
   publish). Can share the same tag as a Windows release (uploads onto it).
-- The CUDA-specific Windows trimming in `electron-builder.yml` (`win-x64-cuda-ext`,
-  `localBuilds/*`, the llama.cpp source) is a no-op on mac (those paths don't
-  exist), so the `files` filters are shared.
+- The Windows-specific trimming in `electron-builder.yml` (`win-x64-cuda-ext`,
+  vcxproj/.lib/.exp) is a no-op on mac, and the mac-specific trims (Makefile,
+  compile_commands.json) are a no-op on Windows, so the `files` filters are shared.
 
 ## Rebuilding the llama backend (custom b9616)
 - The compiled build under `localBuilds/` is **not** in git; only the source
   patches are (`patches/node-llama-cpp+3.18.1.patch`, applied by the `postinstall`
-  hook). After `npm install`, regenerate the binaries with `npm run rebuild:llama`.
+  hook). After `npm install`, regenerate the binaries: `npm run rebuild:llama`
+  (Windows, CUDA) or `npm run rebuild:llama:mac` (macOS, Metal). Both run
+  `patch-package` then `node-llama-cpp source download --release b9616 --gpu
+  {cuda,metal}`; the `--gpu metal` run rewrites `lastBuild.json` to
+  `mac-arm64-metal-release-b9616`.
 - Prereqs (Windows): **CUDA Toolkit** (13.x ok) + **VS Build Tools 2022** + CMake.
   If cmake errors `No CUDA toolset found`, copy CUDA's MSBuild integration into VS:
   `CUDA\vX.Y\extras\visual_studio_integration\MSBuildExtensions\*` →
   `…\BuildTools\MSBuild\Microsoft\VC\v170\BuildCustomizations\` (needs admin).
-- The patch carries three source fixes the addon needs against b9616: addon C++
-  standard → C++17, link `llama-common` (renamed from `common`), and
+- Prereqs (macOS): **Xcode Command Line Tools** only (`xcode-select --install`) —
+  clang + the Metal SDK. CMake/ninja are **not** needed system-wide; node-llama-cpp
+  downloads its own (xpack) cmake during the build, and uses the Unix Makefiles
+  generator. The Metal shaders compile into `libggml.metal.b9616.dylib`. Verified
+  on Apple Silicon (M-series).
+- The patch carries three source fixes the addon needs against b9616 (both GPUs):
+  addon C++ standard → C++17, link `llama-common` (renamed from `common`), and
   `cpu_get_num_math` → `common_cpu_get_num_math`. To target a newer llama.cpp tag,
-  bump the release in `rebuild:llama` + `llama.cpp.info.json` + the `localBuilds`
-  folder name in `lastBuild.json`, and expect to re-derive these patches.
+  bump the release in `rebuild:llama`/`rebuild:llama:mac` + `llama.cpp.info.json` +
+  the `localBuilds` folder name in `lastBuild.json`, and expect to re-derive these.
 
 ## Verify
 - `npm run typecheck && npm test && npm run build`

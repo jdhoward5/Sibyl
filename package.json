@@ -28,7 +28,8 @@
     "release": "pwsh -File scripts/release.ps1",
     "release:mac": "node scripts/release-mac.mjs",
     "postinstall": "patch-package",
-    "rebuild:llama": "patch-package && node-llama-cpp source download --release b9616 --gpu cuda"
+    "rebuild:llama": "patch-package && node-llama-cpp source download --release b9616 --gpu cuda",
+    "rebuild:llama:mac": "patch-package && node-llama-cpp source download --release b9616 --gpu metal"
   },
   "dependencies": {
     "electron-squirrel-startup": "^1.0.1",

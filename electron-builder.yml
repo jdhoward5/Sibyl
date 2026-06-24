@@ -9,11 +9,13 @@ files:
   - out/**/*
   - package.json
   # Trim dead weight from the packaged native deps. We ship a custom from-source
-  # llama.cpp build (b9616 CUDA) under llama/localBuilds — it adds gemma4 support
-  # the prebuilt b8390 lacks — plus the prebuilt CPU + Vulkan backends as a
-  # fallback. We drop the rest:
+  # llama.cpp build (b9616) under llama/localBuilds — CUDA on Windows, Metal on
+  # macOS — which adds newer-architecture support (e.g. gemma4) the prebuilt b8390
+  # lacks, plus the matching prebuilt backends (CPU + Vulkan on Windows, CPU on
+  # mac) as a fallback. We drop the rest:
   #  - win-x64-cuda-ext (~440 MB) only adds coverage for very old NVIDIA archs
-  #  - arm64 prebuilts are useless on an x64 build
+  #  - arm64 *prebuilts* are useless on an x64 Windows build (no-op on a mac build,
+  #    which legitimately ships @node-llama-cpp/mac-arm64-metal)
   - "!**/node_modules/@node-llama-cpp/win-x64-cuda-ext/**"
   - "!**/node_modules/@node-llama-cpp/win-arm64/**"
   # The top-level llama.cpp *source* checkout (~153 MB) that `rebuild:llama`
@@ -22,11 +24,13 @@ files:
   # blow past Windows' 260-char MAX_PATH when packed into a Squirrel nupkg.
   - "!**/node_modules/node-llama-cpp/llama/llama.cpp/**"
   # Keep only the custom build's runtime output: Release/ holds the .node + the
-  # DLLs colocated beside it (this is the dir node-llama-cpp loads), and
+  # DLLs/dylibs colocated beside it (this is the dir node-llama-cpp loads), and
   # buildDone.status + lastBuild.json are needed for it to resolve the build.
-  # Drop the entire from-source build tree (~400 MB of intermediates: the
-  # llama.cpp checkout, CMake scratch, MSBuild .dir/obj, vcxproj, the duplicate
-  # bin/ copy of the DLLs, and cmake compiler-id probe executables).
+  # Drop the entire from-source build tree (CMake/MSBuild/Make scratch, the
+  # llama.cpp checkout, the duplicate bin/ copy of the libs, compiler-id probes).
+  # The globs are platform-agnostic (`*` matches win-x64-cuda-release-b9616 and
+  # mac-arm64-metal-release-b9616 alike); the last two lines are mac-build scratch
+  # (Unix Makefiles generator), the vcxproj/.lib/.exp ones are Windows (MSBuild).
   - "!**/node_modules/node-llama-cpp/llama/localBuilds/*/llama.cpp/**"
   - "!**/node_modules/node-llama-cpp/llama/localBuilds/*/CMakeFiles/**"
   - "!**/node_modules/node-llama-cpp/llama/localBuilds/*/*.dir/**"
@@ -37,6 +41,8 @@ files:
   - "!**/node_modules/node-llama-cpp/llama/localBuilds/*/*.exp"
   - "!**/node_modules/node-llama-cpp/llama/localBuilds/*/CMakeCache.txt"
   - "!**/node_modules/node-llama-cpp/llama/localBuilds/*/cmake_install.cmake"
+  - "!**/node_modules/node-llama-cpp/llama/localBuilds/*/Makefile"
+  - "!**/node_modules/node-llama-cpp/llama/localBuilds/*/compile_commands.json"
 # node-llama-cpp ships native .node bindings and prebuilt llama.cpp binaries
 # that must be kept outside the asar archive so they can be dlopen-ed at runtime.
 asarUnpack:
