@@ -1,10 +1,10 @@
 name: CI
 
-# Fast, free regression check on every push/PR. Runs on a GitHub-hosted
-# Windows runner: it does NOT compile the custom CUDA backend and does NOT
-# run the GPU smoke (no NVIDIA GPU on hosted runners) — that lives in
-# release.yml on the self-hosted box. This just catches TS / logic / build
-# regressions cheaply.
+# Fast, free regression check on every push/PR. Runs on GitHub-hosted Windows
+# and macOS runners: it does NOT compile the custom CUDA backend and does NOT
+# run the GPU smoke (no NVIDIA GPU / no real Metal headless run on hosted
+# runners) — that's cut locally per platform (release.ps1 / release-mac.mjs).
+# This just catches TS / logic / build regressions cheaply on both OSes.
 on:
   push:
     branches: [main]
@@ -19,7 +19,12 @@ concurrency:
 
 jobs:
   check:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-latest → x64 (CUDA/Vulkan); macos-latest → Apple Silicon (Metal).
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

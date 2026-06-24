@@ -33,6 +33,14 @@ class Updater extends EventEmitter {
       this.set({ state: 'dev-disabled' })
       return
     }
+    // Squirrel.Windows-only. On macOS the equivalent (Squirrel.Mac) requires a
+    // code-signed Developer ID app; Sibyl ships unsigned, so the mac build has no
+    // in-app updater — users re-download the DMG. Reporting 'unsupported' avoids
+    // calling the native autoUpdater, which throws on an unsigned mac app.
+    if (process.platform !== 'win32') {
+      this.set({ state: 'unsupported' })
+      return
+    }
     try {
       autoUpdater.setFeedURL({ url: FEED_URL })
     } catch (err) {
@@ -69,6 +77,10 @@ class Updater extends EventEmitter {
       this.set({ state: 'dev-disabled' })
       return this.status
     }
+    if (process.platform !== 'win32') {
+      this.set({ state: 'unsupported' })
+      return this.status
+    }
     this.init()
     if (this.status.state === 'error') return this.status
     try {
@@ -85,7 +97,7 @@ class Updater extends EventEmitter {
    * dispose the GPU first (bounded) for a clean exit; that's all that's needed now.
    */
   async install(): Promise<void> {
-    if (!app.isPackaged) return
+    if (!app.isPackaged || process.platform !== 'win32') return
     try {
       await Promise.race([teardownGpu(), new Promise<void>((resolve) => setTimeout(resolve, 6000))])
     } catch {

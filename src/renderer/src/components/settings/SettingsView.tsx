@@ -152,15 +152,25 @@ function UpdatesSection() {
   // 'available' and 'downloading' are the same transient stage now — Squirrel
   // auto-downloads as soon as it finds an update, with no progress to show.
   const fetching = state === 'checking' || state === 'available' || state === 'downloading'
+  // No in-app updater on this platform (the unsigned macOS build): there's
+  // nothing to check, so hide the button and point at a manual download instead.
+  const noUpdater = state === 'unsupported'
 
   return (
-    <Section title="Updates" desc="Sibyl checks GitHub for new releases on launch and downloads them automatically.">
+    <Section
+      title="Updates"
+      desc={
+        noUpdater
+          ? 'Update by downloading the latest release.'
+          : 'Sibyl checks GitHub for new releases on launch and downloads them automatically.'
+      }
+    >
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <p className="text-[13px] text-sibyl-text">Current version</p>
           <p className="font-mono text-[11px] text-sibyl-muted">{currentVersion}</p>
         </div>
-        {state !== 'downloaded' && (
+        {state !== 'downloaded' && !noUpdater && (
           <button
             onClick={() => void actions.checkForUpdate()}
             disabled={fetching}
@@ -169,10 +179,27 @@ function UpdatesSection() {
             {state === 'checking' ? 'Checking…' : 'Check for updates'}
           </button>
         )}
+        {noUpdater && (
+          <a
+            href="https://github.com/jdhoward5/Sibyl/releases/latest"
+            target="_blank"
+            rel="noreferrer"
+            className="btn-surface shrink-0 px-3 py-1.5 text-[13px]"
+          >
+            View latest release
+          </a>
+        )}
       </div>
 
       {state === 'not-available' && (
         <p className="text-[12.5px] text-sibyl-muted">You’re running the latest version.</p>
+      )}
+
+      {noUpdater && (
+        <p className="text-[12.5px] text-sibyl-muted">
+          Automatic updates aren’t available in this build. Download the newest version from the
+          releases page when one is published.
+        </p>
       )}
 
       {state === 'dev-disabled' && (
@@ -221,12 +248,21 @@ export function SettingsView() {
   const load = settings.load
   const ctx = settings.context
 
-  const gpuOptions: { value: AppSettings['gpu']; label: string }[] = [
-    { value: 'auto', label: 'Auto' },
-    { value: 'cuda', label: 'CUDA' },
-    { value: 'vulkan', label: 'Vulkan' },
-    { value: 'cpu', label: 'CPU' }
-  ]
+  // Offer only the backends that exist on the current OS: Metal on macOS,
+  // CUDA/Vulkan on Windows. 'Auto' and 'CPU' are always valid.
+  const isMac = appInfo?.platform === 'darwin'
+  const gpuOptions: { value: AppSettings['gpu']; label: string }[] = isMac
+    ? [
+        { value: 'auto', label: 'Auto' },
+        { value: 'metal', label: 'Metal' },
+        { value: 'cpu', label: 'CPU' }
+      ]
+    : [
+        { value: 'auto', label: 'Auto' },
+        { value: 'cuda', label: 'CUDA' },
+        { value: 'vulkan', label: 'Vulkan' },
+        { value: 'cpu', label: 'CPU' }
+      ]
 
   return (
     <div className="flex-1 overflow-y-auto">

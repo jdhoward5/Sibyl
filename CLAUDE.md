@@ -93,6 +93,40 @@ locally via `node-llama-cpp`. Stack: electron-vite + React + TS + Tailwind.
   restriction) and fall back to CPU; it works fine in real Electron. Verify GPU via
   the packaged app, not a bare `node` invocation.
 
+## macOS build (Metal, unsigned, arm64)
+- The app is **cross-platform**; platform-specific code branches on
+  `process.platform` (`'win32'` vs `'darwin'`). Things gated to Windows: the
+  custom `lastBuild` CUDA backend (`llama.ts`), the `UV_THREADPOOL_SIZE=1` libuv
+  pin and `titleBarOverlay` (`index.ts`), and the Squirrel `autoUpdater`
+  (`updater.ts`). macOS gets: the prebuilt **Metal** backend, native traffic
+  lights (`trafficLightPosition`, the renderer `TitleBar` pads the **left**), and
+  an `'unsupported'` update state. The renderer reads `appInfo.platform` to pick
+  GPU options (Auto/Metal/CPU) and the updates UI.
+- Backend: ships node-llama-cpp's prebuilt **`@node-llama-cpp/mac-arm64-metal`**
+  (Metal GPU on Apple Silicon) + CPU fallback. `llama.ts` resolves it via the
+  normal `getLlama({ gpu })` path — **no** custom local build on mac. NOTE: the
+  prebuilt is **b8390**, so (like the prebuilt Windows path) it can't load the
+  newest archs, e.g. `gemma4` → `unknown model architecture`. A from-source Metal
+  b9616 build (`node-llama-cpp source download --release b9616 --gpu metal`, needs
+  Xcode CLT + CMake) would close that gap but isn't shipped yet.
+- Build: `npm run make-icon:mac` (one-time — generates `build/icon.icns` from the
+  brand mark via an offscreen Electron render) then `npm run dist:mac` =
+  `electron-vite build && electron-builder --mac --arm64`. Output:
+  `release/<v>/Sibyl-<v>-arm64.dmg` + `.zip` (Apple Silicon only).
+- **Unsigned** (`mac.identity: null`), matching the unsigned Windows build. No
+  Apple Developer ID → no signing/notarization → Gatekeeper quarantines the
+  download: first launch needs **right-click → Open** (or
+  `xattr -dr com.apple.quarantine /Applications/Sibyl.app`). Because Squirrel.Mac
+  requires signing, there is **no in-app updater** on mac (`updater.ts` reports
+  `'unsupported'`); users re-download the `.dmg`. Installs to `/Applications`;
+  userData stays at `~/Library/Application Support/Sibyl`.
+- Release: `npm run release:mac` (`scripts/release-mac.mjs`) — verify + build +
+  publish the dmg/zip to the `v<version>` GitHub release (`--dry-run` to skip
+  publish). Can share the same tag as a Windows release (uploads onto it).
+- The CUDA-specific Windows trimming in `electron-builder.yml` (`win-x64-cuda-ext`,
+  `localBuilds/*`, the llama.cpp source) is a no-op on mac (those paths don't
+  exist), so the `files` filters are shared.
+
 ## Rebuilding the llama backend (custom b9616)
 - The compiled build under `localBuilds/` is **not** in git; only the source
   patches are (`patches/node-llama-cpp+3.18.1.patch`, applied by the `postinstall`

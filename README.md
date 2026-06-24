@@ -1,8 +1,8 @@
 # Sibyl
 
-A beautiful, secure **Windows desktop app** for downloading chat/text models from
-**Hugging Face** and talking to them — entirely **on your own machine**. No cloud,
-no telemetry, no data leaving your computer.
+A beautiful, secure **desktop app** (Windows & macOS) for downloading chat/text
+models from **Hugging Face** and talking to them — entirely **on your own
+machine**. No cloud, no telemetry, no data leaving your computer.
 
 ![Sibyl](docs/screenshot.png)
 
@@ -11,12 +11,13 @@ no telemetry, no data leaving your computer.
 - 🔮 **Discover & download** GGUF chat models straight from Hugging Face, with a
   curated view of quantizations (size vs. quality) and resumable downloads.
 - ⚡ **GPU-accelerated local inference** via [`node-llama-cpp`](https://node-llama-cpp.withcat.ai)
-  (llama.cpp). Streams tokens in real time. Built for NVIDIA CUDA, incl.
-  **Blackwell / RTX 50-series**.
+  (llama.cpp). Streams tokens in real time. NVIDIA **CUDA** (incl. **Blackwell /
+  RTX 50-series**) on Windows, Apple **Metal** on Apple-Silicon Macs.
 - 💬 **Polished chat** — markdown + code blocks with copy, multi-conversation
   history, per-message token/throughput stats, stop-generation, system prompts.
 - 🎛️ **Full control** — temperature, top-p/k, min-p, repeat penalty, context
-  window, GPU layers, and inference backend (Auto/CUDA/Vulkan/CPU).
+  window, GPU layers, and inference backend (Auto/CUDA/Vulkan/CPU on Windows;
+  Auto/Metal/CPU on macOS).
 - 🔒 **Secure by construction** — context isolation, no node integration in the
   renderer, a narrow typed preload bridge, strict CSP, navigation guards, and
   the optional Hugging Face token encrypted at rest via the OS keychain.
@@ -46,13 +47,15 @@ the bridge can never drift.
 
 ## Requirements
 
-- Windows 10/11 (x64)
+- Windows 10/11 (x64) **or** macOS on Apple Silicon (arm64 — M1 or newer)
 - Node.js 20+
-- For **GPU acceleration**: just an up-to-date NVIDIA driver (CUDA) or a
-  Vulkan-capable GPU. node-llama-cpp ships prebuilt CUDA/Vulkan binaries — no
-  CUDA Toolkit, Visual Studio or CMake required. The bundled CUDA backend runs
-  on all modern NVIDIA GPUs including **Blackwell / RTX 50-series** (verified on
-  an RTX 5090). Sibyl falls back to Vulkan, then CPU, automatically.
+- For **GPU acceleration**: nothing extra to install. node-llama-cpp ships
+  prebuilt binaries — no CUDA Toolkit, Xcode, Visual Studio or CMake required.
+  - **Windows**: an up-to-date NVIDIA driver (CUDA) or any Vulkan-capable GPU.
+    The bundled CUDA backend runs on all modern NVIDIA GPUs including **Blackwell
+    / RTX 50-series** (verified on an RTX 5090). Falls back to Vulkan, then CPU.
+  - **macOS**: the GPU is used via **Metal** out of the box on Apple Silicon.
+    Falls back to CPU. (Intel Macs aren't shipped — see the build notes below.)
 
 ## Getting started
 
@@ -77,27 +80,45 @@ GPU and streams a response — printing the active backend and tokens/sec.
 ## Building an installer
 
 ```bash
-npm run dist      # electron-builder → NSIS installer in release/
+# Windows: Squirrel.Windows installer + update package in release/<version>/squirrel/
+npm run dist
+
+# macOS: unsigned .dmg + .zip (Apple Silicon) in release/<version>/
+npm run make-icon:mac   # one-time: (re)generate build/icon.icns
+npm run dist:mac
 ```
 
 `node-llama-cpp`'s native bindings and the compiled llama.cpp binaries are kept
 outside the asar archive (see `electron-builder.yml`) so they load at runtime.
 
+The Windows build uses **Squirrel.Windows** (side-by-side installs, applied on
+restart — never overwriting the running binary). The macOS build is an **unsigned**
+`.dmg`: without an Apple Developer ID we can't sign or notarize, so on first launch
+macOS Gatekeeper will block it — **right-click → Open** (or
+`xattr -dr com.apple.quarantine /Applications/Sibyl.app`) once to allow it.
+Because Squirrel.Mac requires signing, the macOS build has **no in-app updater** —
+update by re-downloading the `.dmg`. Windows updates automatically in-app.
+
 ### Cutting a release
 
-Releases are cut **locally**, by hand, on a CUDA-capable dev box — we don't run a
-self-hosted CI runner (that would leave a GitHub-triggered build daemon on a
-machine holding your credentials). [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
-still runs typecheck/test/build on every push/PR via a hosted runner.
+Releases are cut **locally**, by hand — we don't run a self-hosted CI runner (that
+would leave a GitHub-triggered build daemon on a machine holding your
+credentials). [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs
+typecheck/test/build on every push/PR via hosted Windows + macOS runners.
 
 ```bash
-npm run release   # verify + GPU smoke + build installer + publish GitHub pre-release
+# Windows (on a CUDA-capable dev box):
+npm run release         # verify + GPU smoke + build Squirrel artifacts + publish
+
+# macOS (on an Apple-Silicon Mac):
+npm run release:mac     # verify + build .dmg/.zip + publish (--dry-run to skip publish)
 ```
 
-`scripts/release.ps1` refuses a dirty tree, runs the tests and a real-GPU smoke,
-builds the NSIS installer, tags the commit `v<version>`, and publishes a GitHub
-pre-release with the `.exe` attached (needs an authenticated `gh` CLI). Pass
-`-DryRun` to build without publishing, or `-SkipSmoke` to skip the GPU gate.
+`scripts/release.ps1` (Windows) and `scripts/release-mac.mjs` (macOS) each refuse a
+dirty tree, run the tests, build the platform artifacts, tag the commit
+`v<version>`, and publish them to that GitHub release (needs an authenticated `gh`
+CLI). The two can target the **same** `v<version>` tag — whichever runs second
+uploads its assets onto the existing release.
 
 ## Security notes
 

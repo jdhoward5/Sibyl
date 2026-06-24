@@ -21,7 +21,9 @@ if (squirrelStartup) {
 // keeps create + free on the same thread, so GPU teardown is clean. libuv reads
 // this lazily when it first initializes the pool; setting it at the top of the
 // main entry (before any fs/crypto/native async work) takes effect in practice.
-if (!process.env.UV_THREADPOOL_SIZE) {
+// Windows/CUDA-only: the macOS Metal backend doesn't have this hazard, and a
+// single-worker pool would needlessly serialize its libuv I/O (fs/crypto/dns).
+if (process.platform === 'win32' && !process.env.UV_THREADPOOL_SIZE) {
   process.env.UV_THREADPOOL_SIZE = '1'
 }
 
@@ -84,6 +86,7 @@ function hardenSession(): void {
 }
 
 function createWindow(): void {
+  const isMac = process.platform === 'darwin'
   const win = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -92,8 +95,15 @@ function createWindow(): void {
     show: false,
     backgroundColor: '#0b0c14',
     title: 'Sibyl',
+    // Custom chrome on every platform (our TitleBar component is the caption).
     titleBarStyle: 'hidden',
-    titleBarOverlay: { color: '#0b0c14', symbolColor: '#8b8fa8', height: 40 },
+    // Windows/Linux: draw the caption buttons ourselves via the overlay. macOS
+    // keeps its native traffic lights (inset by titleBarStyle:'hidden') — nudge
+    // them to vertically center within our 40px-tall header. titleBarOverlay is
+    // a no-op on macOS, so the two are mutually exclusive by platform.
+    ...(isMac
+      ? { trafficLightPosition: { x: 14, y: 13 } }
+      : { titleBarOverlay: { color: '#0b0c14', symbolColor: '#8b8fa8', height: 40 } }),
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.mjs'),
       contextIsolation: true,

@@ -22,11 +22,11 @@ let llamaGpu: AppSettings['gpu'] | null = null
 /**
  * Build the prioritized list of strategies for obtaining a Llama instance.
  *
- * We ship node-llama-cpp's prebuilt binaries (CUDA — which supports modern
- * NVIDIA GPUs incl. Blackwell/RTX 50-series — plus Vulkan and CPU). Every
- * strategy uses `build: 'never'` so the app never tries to invoke a C++ compiler
- * at runtime (which would fail inside a packaged app). We degrade gracefully:
- * requested backend → auto-detect → CPU.
+ * We ship node-llama-cpp's prebuilt binaries: on Windows CUDA (which supports
+ * modern NVIDIA GPUs incl. Blackwell/RTX 50-series) + Vulkan + CPU; on macOS
+ * Metal (Apple Silicon GPU) + CPU. Every strategy uses `build: 'never'` so the
+ * app never tries to invoke a C++ compiler at runtime (which would fail inside a
+ * packaged app). We degrade gracefully: requested backend → auto-detect → CPU.
  */
 async function createLlama(gpu: AppSettings['gpu']): Promise<NLC.Llama> {
   const { getLlama } = await nlc()
@@ -40,9 +40,11 @@ async function createLlama(gpu: AppSettings['gpu']): Promise<NLC.Llama> {
   // option-based resolution fails to locate a local build inside a packaged
   // (asar) app — the computed build-folder name doesn't match — so we resolve it
   // explicitly via "lastBuild", which reads the folder name from lastBuild.json.
-  // Only when the user wants GPU/auto; `usePrebuiltBinaries` keeps the normal
-  // fallback if no local build is present (e.g. a prebuilt-only install).
-  if (gpu === 'auto' || gpu === 'cuda') {
+  // Windows-only: the custom build is CUDA, and is the only platform we ship a
+  // localBuild for. macOS uses the prebuilt Metal backend below. Only when the
+  // user wants GPU/auto; `usePrebuiltBinaries` keeps the normal fallback if no
+  // local build is present (e.g. a prebuilt-only install).
+  if (process.platform === 'win32' && (gpu === 'auto' || gpu === 'cuda')) {
     attempts.push(() =>
       getLlama('lastBuild', {
         usePrebuiltBinaries: true,

@@ -49,3 +49,27 @@ asarUnpack:
 # straight from GitHub releases (see src/main/updater.ts).
 win:
   icon: build/icon.ico
+# macOS build. Unlike Windows there's no Squirrel step — electron-builder emits the
+# distributable (.dmg + .zip) directly. Apple Silicon (arm64) only: the shipped
+# node-llama-cpp backend is @node-llama-cpp/mac-arm64-metal (Metal GPU). Intel Macs
+# would need the mac-x64 prebuilt + a separate/universal build.
+#
+# UNSIGNED (identity: null), matching the unsigned Windows build. Without an Apple
+# Developer ID we can't sign or notarize, so Gatekeeper quarantines the download —
+# first launch needs right-click → Open (or `xattr -dr com.apple.quarantine`). This
+# is also why there's no in-app updater on macOS (Squirrel.Mac requires signing);
+# src/main/updater.ts reports `unsupported` and the user re-downloads the DMG.
+mac:
+  category: public.app-category.developer-tools
+  icon: build/icon.icns
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  target:
+    - target: dmg
+      arch: arm64
+    - target: zip
+      arch: arm64
+dmg:
+  artifactName: ${productName}-${version}-${arch}.${ext}

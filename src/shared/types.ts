@@ -292,8 +292,12 @@ export interface AppSettings {
   theme: 'dark' | 'light'
   /** Accent palette applied to the chat surface (buttons, caret, user voice). */
   accent: AccentThemeKey
-  /** Preferred GPU backend; 'auto' lets the engine decide. */
-  gpu: 'auto' | 'cuda' | 'vulkan' | 'cpu'
+  /**
+   * Preferred GPU backend; 'auto' lets the engine decide. The relevant choices
+   * are platform-specific — 'cuda'/'vulkan' on Windows, 'metal' on macOS — but
+   * any unavailable backend degrades gracefully (→ auto → CPU) in the engine.
+   */
+  gpu: 'auto' | 'cuda' | 'vulkan' | 'metal' | 'cpu'
   /**
    * Verify a download's SHA-256 against Hugging Face's published checksum after
    * it finishes. Slower for large models; when off, only the (cheap) byte-size
@@ -333,6 +337,8 @@ export interface EngineStatus {
  *  - `downloaded`   the update is staged; a restart will apply it
  *  - `error`        the last check/download failed
  *  - `dev-disabled` running unpackaged (dev) — updates are unavailable
+ *  - `unsupported`  this platform has no in-app updater (e.g. the unsigned macOS
+ *                   build — Squirrel.Mac requires code-signing); update manually
  */
 export interface UpdateStatus {
   state:
@@ -344,6 +350,7 @@ export interface UpdateStatus {
     | 'downloaded'
     | 'error'
     | 'dev-disabled'
+    | 'unsupported'
   /** The running app version (always set). */
   currentVersion: string
   /** The available/target release version, when known. */
