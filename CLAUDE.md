@@ -229,7 +229,11 @@ locally via `node-llama-cpp`. Stack: electron-vite + React + TS + Tailwind.
 - `npm run smoke` — real download + GPU generation (outside Electron).
 - Headless in-app E2E: build, then run electron with `SIBYL_SMOKE=1` and
   `SIBYL_SMOKE_MODEL=<path to a .gguf>` (drives load + 2 conversations through
-  the real IPC stack, screenshots to `SIBYL_SMOKE_OUT`).
+  the real IPC stack, screenshots to `SIBYL_SMOKE_OUT`). Add `SIBYL_SMOKE_SCENE=1`
+  to instead drive a **self-roleplay scene**: 3 round-robin beats via
+  `engine.generateBeat`, then two simultaneous `chat.advance` calls to assert the
+  engine serializes them (one beat done, one rejected — no concurrent-prompt crash).
+  Pass `--user-data-dir=<tmp>` to keep it off your real personas/conversations.
 
 ## npm audit / security
 - **Never run `npm audit fix --force`** here — it blindly bumps Electron/Vite/

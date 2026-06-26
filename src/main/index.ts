@@ -188,6 +188,92 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
         installedAt: new Date().toISOString()
       })
 
+      const modelId = modelIdFor(repoId, filename)
+
+      // Scene path (SIBYL_SMOKE_SCENE): drive multi-persona self-roleplay through
+      // the real bridge — 3 round-robin beats via engine.generateBeat, then fire
+      // two advances at once to prove the engine serializes them (one beat
+      // completes, the other is cleanly rejected; no concurrent-prompt crash).
+      if (process.env.SIBYL_SMOKE_SCENE) {
+        const sc = (await win.webContents.executeJavaScript(
+          `(async () => {
+            const id = ${JSON.stringify(modelId)};
+            const o = window.sibyl;
+            const load = await o.engine.load(id);
+            if (!load.ok) return { error: 'load failed: ' + load.error };
+            const personas = [
+              { id:'sc-ada', name:'Ada', role:'engineer', brief:'You are Ada, a blunt starship engineer. Reply with one short sentence, in character.', avatar:{monogram:'AD',gradient:['#5ee7ff','#3c93a4']}, voiceTags:[] },
+              { id:'sc-bo', name:'Bo', role:'pilot', brief:'You are Bo, a cocky pilot. Reply with one short sentence, in character.', avatar:{monogram:'BO',gradient:['#ffa3b8','#a66878']}, voiceTags:[] }
+            ];
+            const sset = await o.settings.set({ personas });
+            if (!sset.ok) return { error: 'settings.set failed: ' + sset.error };
+            const convId = 'smoke-scene-1';
+            const t0 = new Date().toISOString();
+            await o.conversations.save({ id: convId, title:'Smoke scene', modelId:id, messages:[], cast:['sc-ada','sc-bo'], scenePremise:'Two crew aboard a failing ship argue about what to do.', createdAt:t0, updatedAt:t0 });
+            const nameOf = (sid) => sid === 'sc-ada' ? 'Ada' : 'Bo';
+            async function beat(speakerId, asstId) {
+              const conv = (await o.conversations.get(convId)).data;
+              conv.messages.push({ id:asstId, role:'assistant', content:'', createdAt:new Date().toISOString(), speakerId, speakerName: nameOf(speakerId) });
+              await o.conversations.save(conv);
+              await o.chat.invalidateSession(convId);
+              let text=''; let unsub;
+              const done = new Promise((resolve)=>{ unsub = o.chat.onEvent((e)=>{ if(e.messageId!==asstId) return; if(e.type==='token') text+=e.text; else if(e.type==='done') resolve({text}); else if(e.type==='error') resolve({error:e.error}); }); });
+              const adv = await o.chat.advance({ conversationId: convId, speakerId, assistantMessageId: asstId, options:{ maxTokens: 64 } });
+              if(!adv.ok){ if(unsub) unsub(); return { error:'advance failed: '+adv.error }; }
+              const r = await Promise.race([done, new Promise((res)=>setTimeout(()=>res({error:'timeout',text}),60000))]);
+              if(unsub) unsub();
+              const c2 = (await o.conversations.get(convId)).data;
+              const m = c2.messages.find((x)=>x.id===asstId);
+              if(m){ m.content = r.text||''; await o.conversations.save(c2); }
+              return r;
+            }
+            const b1 = await beat('sc-ada','beat-1'); if(b1.error||!(b1.text||'').trim()) return { error:'beat1: '+(b1.error||'empty') };
+            const b2 = await beat('sc-bo','beat-2');  if(b2.error||!(b2.text||'').trim()) return { error:'beat2: '+(b2.error||'empty') };
+            const b3 = await beat('sc-ada','beat-3'); if(b3.error||!(b3.text||'').trim()) return { error:'beat3: '+(b3.error||'empty') };
+            // Concurrency latch: append two beats, fire both advances without awaiting.
+            const conv = (await o.conversations.get(convId)).data;
+            conv.messages.push({ id:'race-1', role:'assistant', content:'', createdAt:new Date().toISOString(), speakerId:'sc-bo', speakerName:'Bo' });
+            conv.messages.push({ id:'race-2', role:'assistant', content:'', createdAt:new Date().toISOString(), speakerId:'sc-ada', speakerName:'Ada' });
+            await o.conversations.save(conv);
+            await o.chat.invalidateSession(convId);
+            const outcomes = {}; let count=0; let settle; const both = new Promise((res)=>{ settle=res; });
+            const unsub2 = o.chat.onEvent((e)=>{ if(e.messageId!=='race-1'&&e.messageId!=='race-2') return; if(e.type==='done'){ outcomes[e.messageId]='done'; if(++count===2) settle(); } else if(e.type==='error'){ outcomes[e.messageId]='error'; if(++count===2) settle(); } });
+            const r1p = o.chat.advance({ conversationId: convId, speakerId:'sc-bo', assistantMessageId:'race-1', options:{ maxTokens: 64 } });
+            const r2p = o.chat.advance({ conversationId: convId, speakerId:'sc-ada', assistantMessageId:'race-2', options:{ maxTokens: 64 } });
+            await Promise.all([r1p, r2p]);
+            await Promise.race([both, new Promise((res)=>setTimeout(res, 60000))]);
+            unsub2();
+            const vals = Object.values(outcomes);
+            return { beat1Len:b1.text.length, beat2Len:b2.text.length, beat3Len:b3.text.length, raceOutcomes:outcomes, doneCount:vals.filter((x)=>x==='done').length, errCount:vals.filter((x)=>x==='error').length };
+          })()`,
+          true
+        )) as {
+          error?: string
+          beat1Len?: number
+          beat2Len?: number
+          beat3Len?: number
+          doneCount?: number
+          errCount?: number
+          raceOutcomes?: Record<string, string>
+        }
+        const beats = [sc.beat1Len ?? 0, sc.beat2Len ?? 0, sc.beat3Len ?? 0]
+        const pass = !sc.error && beats.every((n) => n > 0) && sc.doneCount === 1 && sc.errCount === 1
+        // Privacy: log only lengths + outcome labels, never the beat text.
+        console.log(
+          '[smoke] scene result:',
+          JSON.stringify({ ok: pass, error: sc.error, beats, raceDone: sc.doneCount, raceErr: sc.errCount, race: sc.raceOutcomes })
+        )
+        await shot('sibyl-smoke-scene.png')
+        if (!pass) {
+          console.error('[smoke] SCENE FAILED')
+          setTimeout(() => app.exit(1), 300)
+          return
+        }
+        console.log('[smoke] ✅ IN-APP SCENE PASSED (3 round-robin beats + concurrency latch)')
+        setTimeout(() => app.quit(), 400)
+        return
+      }
+
       // Drive load → send → stream through window.sibyl (the real bridge).
       const result = (await win.webContents.executeJavaScript(
         `(async () => {
