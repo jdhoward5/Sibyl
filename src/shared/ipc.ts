@@ -18,6 +18,7 @@ import type {
   UpdateStatus
 } from './types'
 import type { ExportFormat } from './export'
+import type { InstalledVoice, TtsEvent, TtsStatus, TtsVoiceDownload } from './tts'
 
 export const IPC = {
   // Hugging Face discovery
@@ -64,6 +65,19 @@ export const IPC = {
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
 
+  // Text-to-speech (on-device Piper voices)
+  ttsStatus: 'tts:status',
+  ttsStatusEvent: 'tts:statusEvent', // main → renderer event
+  ttsVoicesList: 'tts:voicesList', // installed voices on disk
+  ttsVoiceDownloads: 'tts:voiceDownloads', // in-flight voice downloads
+  ttsVoiceDownload: 'tts:voiceDownload',
+  ttsVoiceCancel: 'tts:voiceCancel',
+  ttsVoiceDelete: 'tts:voiceDelete',
+  ttsVoiceProgress: 'tts:voiceProgress', // main → renderer event
+  ttsSpeak: 'tts:speak',
+  ttsStop: 'tts:stop',
+  ttsEvent: 'tts:event', // main → renderer streaming audio
+
   // Auto-update (Squirrel auto-downloads, so there's no manual download step)
   updateCheck: 'update:check',
   updateInstall: 'update:install',
@@ -81,6 +95,17 @@ export interface ChatSendRequest {
   /** Assistant message id the renderer pre-allocated for streaming into. */
   assistantMessageId: string
   options?: Partial<GenerationOptions>
+}
+
+export interface TtsSpeakRequest {
+  /** The assistant message this speech belongs to (drives the UI highlight). */
+  messageId: string
+  /** The text to speak (typically the assistant message's content). */
+  text: string
+  /** Override the configured voice for this request. */
+  voiceId?: string
+  /** Override the configured speaking rate for this request. */
+  rate?: number
 }
 
 export interface AppInfo {
@@ -157,6 +182,26 @@ export interface SibylBridge {
   }
   app: {
     info(): Promise<Result<AppInfo>>
+  }
+  tts: {
+    /** Current speech-subsystem status (availability + what's speaking). */
+    status(): Promise<Result<TtsStatus>>
+    onStatus(cb: (s: TtsStatus) => void): () => void
+    /** Voices downloaded and registered on disk. */
+    listVoices(): Promise<Result<InstalledVoice[]>>
+    /** Voice downloads currently in flight. */
+    listDownloads(): Promise<Result<TtsVoiceDownload[]>>
+    /** Download a catalog voice (by id) from Hugging Face and register it. */
+    downloadVoice(voiceId: string): Promise<Result<void>>
+    cancelVoiceDownload(voiceId: string): Promise<Result<void>>
+    /** Remove a downloaded voice's files + registry entry. */
+    deleteVoice(voiceId: string): Promise<Result<void>>
+    onVoiceProgress(cb: (p: TtsVoiceDownload) => void): () => void
+    /** Synthesize + stream speech for a message. Audio arrives via onEvent. */
+    speak(req: TtsSpeakRequest): Promise<Result<void>>
+    /** Stop the current speech. */
+    stop(): Promise<Result<void>>
+    onEvent(cb: (e: TtsEvent) => void): () => void
   }
   update: {
     /** Check GitHub for a newer release; Squirrel auto-downloads if one exists. */

@@ -1,5 +1,6 @@
 import { engine } from './engine'
 import { disposeLlama } from './llama'
+import { tts } from './tts'
 
 let teardown: Promise<void> | null = null
 
@@ -16,6 +17,11 @@ let teardown: Promise<void> | null = null
 export function teardownGpu(): Promise<void> {
   if (!teardown) {
     teardown = (async () => {
+      try {
+        await tts.dispose()
+      } catch {
+        /* ignore */
+      }
       try {
         await engine.unload()
       } catch {

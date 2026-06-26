@@ -1,6 +1,6 @@
 import { memo, useState } from 'react'
 import type { ChatMessage } from '@shared/types'
-import { actions, useStore } from '../../store'
+import { actions, canSpeak, useStore } from '../../store'
 import { Markdown } from '../../lib/markdown'
 import {
   CopyIcon,
@@ -9,7 +9,9 @@ import {
   TrashIcon,
   RefreshIcon,
   BranchIcon,
-  AlertTriangleIcon
+  AlertTriangleIcon,
+  SpeakerIcon,
+  StopIcon
 } from '../../lib/icons'
 
 interface Props {
@@ -38,6 +40,8 @@ function MessageImpl({ message, streaming, isLast = false, highlighted = false, 
   const [draft, setDraft] = useState('')
   const generating = useStore((s) => s.engine.state === 'generating')
   const streamStats = useStore((s) => s.streamStats)
+  const showSpeak = useStore(canSpeak)
+  const speaking = useStore((s) => s.speakingMessageId === message.id)
   const isUser = message.role === 'user'
 
   // Live streaming counters, shown only while this assistant turn is generating.
@@ -163,11 +167,27 @@ function MessageImpl({ message, streaming, isLast = false, highlighted = false, 
         )}
 
         {!streaming && (message.content || message.stats || message.error) && (
-          <div className="mt-1.5 flex items-center gap-3 opacity-0 transition-opacity group-hover:opacity-100">
+          <div
+            className={`mt-1.5 flex items-center gap-3 transition-opacity group-hover:opacity-100 ${
+              speaking ? 'opacity-100' : 'opacity-0'
+            }`}
+          >
             {message.content && (
               <button onClick={copy} className={ACTION}>
                 {copied ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
                 {copied ? 'Copied' : 'Copy'}
+              </button>
+            )}
+            {showSpeak && message.content && (
+              <button
+                onClick={() =>
+                  speaking ? actions.stopSpeaking() : void actions.speakMessage(message.id, message.content)
+                }
+                className={ACTION}
+                title={speaking ? 'Stop speaking' : 'Read aloud'}
+              >
+                {speaking ? <StopIcon size={12} /> : <SpeakerIcon size={12} />}
+                {speaking ? 'Stop' : 'Speak'}
               </button>
             )}
             {isLast && !message.error && (

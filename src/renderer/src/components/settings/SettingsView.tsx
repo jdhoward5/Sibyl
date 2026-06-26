@@ -2,10 +2,21 @@ import { useState } from 'react'
 import { actions, uid, useStore } from '../../store'
 import type { AppSettings, GenerationProfile } from '@shared/types'
 import { ACCENT_THEMES } from '@shared/themes'
+import { TTS_VOICE_CATALOG } from '@shared/tts'
+import { formatBytes } from '@shared/format'
 import { Section, Slider, Toggle } from '../common/controls'
 import { Avatar } from '../persona/Avatar'
 import { PersonaEditor } from '../persona/PersonaEditor'
-import { PlusIcon, TrashIcon, CheckIcon, EditIcon } from '../../lib/icons'
+import {
+  PlusIcon,
+  TrashIcon,
+  CheckIcon,
+  EditIcon,
+  DownloadIcon,
+  SpeakerIcon,
+  StopIcon,
+  XIcon
+} from '../../lib/icons'
 
 /** Manage the persona library — the reusable characters you write with. */
 function PersonasSection({ settings }: { settings: AppSettings }) {
@@ -139,6 +150,151 @@ function GenerationProfilesSection({ settings }: { settings: AppSettings }) {
           <PlusIcon size={15} /> Save
         </button>
       </div>
+    </Section>
+  )
+}
+
+/** Manage on-device speech: voices to download, selection, and playback controls. */
+function VoiceSpeechSection({ settings }: { settings: AppSettings }) {
+  const tts = settings.tts
+  const status = useStore((s) => s.tts)
+  const installed = useStore((s) => s.installedVoices)
+  const downloads = useStore((s) => s.voiceDownloads)
+  const speaking = useStore((s) => s.speakingMessageId)
+  const available = status?.available ?? false
+  const installedIds = new Set(installed.map((v) => v.id))
+
+  return (
+    <Section
+      title="Voice & speech"
+      desc="Read AI responses aloud with on-device neural voices (Piper). Voices download from Hugging Face and run locally — no audio ever leaves your machine."
+    >
+      {!available && (
+        <p className="text-[12px] text-amber-400/90">
+          {status?.error ?? 'On-device speech is unavailable in this build.'}
+        </p>
+      )}
+
+      <Toggle
+        label="Enable speech"
+        desc="Show a “Speak” control on assistant replies."
+        checked={tts.enabled}
+        onChange={(v) => actions.updateTtsSettings({ enabled: v })}
+      />
+
+      <div className="flex flex-col gap-2">
+        <label className="text-[13px] text-sibyl-text">Voices</label>
+        {TTS_VOICE_CATALOG.map((v) => {
+          const isInstalled = installedIds.has(v.id)
+          const dl = downloads[v.id]
+          const isActive = tts.voiceId === v.id && isInstalled
+          const pct = dl && dl.totalBytes > 0 ? Math.round((dl.receivedBytes / dl.totalBytes) * 100) : 0
+          return (
+            <div
+              key={v.id}
+              className={`flex items-center gap-3 rounded-lg border px-3 py-2 ${
+                isActive ? 'border-sibyl-accent/60 bg-sibyl-accent/10' : 'border-sibyl-border/60'
+              }`}
+            >
+              <button
+                onClick={() => isInstalled && actions.updateTtsSettings({ voiceId: v.id, enabled: true })}
+                disabled={!isInstalled}
+                title={isInstalled ? 'Use this voice' : 'Download to use'}
+                className="shrink-0 disabled:cursor-not-allowed"
+              >
+                <span
+                  className={`flex h-4 w-4 items-center justify-center rounded-full border ${
+                    isActive ? 'border-sibyl-accent bg-sibyl-accent' : 'border-sibyl-border'
+                  }`}
+                >
+                  {isActive && <CheckIcon size={10} className="text-sibyl-bg" />}
+                </span>
+              </button>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[13px] text-sibyl-text">{v.name}</div>
+                <div className="truncate text-[11px] text-sibyl-muted">
+                  {v.language} · {v.quality} · {formatBytes(v.sizeBytes)}
+                </div>
+              </div>
+              {dl ? (
+                <div className="flex shrink-0 items-center gap-2">
+                  <span className="font-mono text-[11px] text-sibyl-accent">{pct}%</span>
+                  <button
+                    onClick={() => actions.cancelVoiceDownload(v.id)}
+                    className="btn-ghost px-2 py-1 text-[12px]"
+                    title="Cancel download"
+                  >
+                    <XIcon size={13} />
+                  </button>
+                </div>
+              ) : isInstalled ? (
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <button
+                    onClick={() => void actions.testVoice(v.id)}
+                    className="btn-ghost px-2 py-1 text-[12px]"
+                    title="Play a sample"
+                  >
+                    <SpeakerIcon size={14} />
+                  </button>
+                  <button
+                    onClick={() => void actions.deleteVoice(v.id)}
+                    className="btn-ghost px-2 py-1 text-[12px] hover:text-red-300"
+                    title="Remove voice"
+                  >
+                    <TrashIcon size={13} />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => actions.downloadVoice(v.id)}
+                  disabled={!available}
+                  className="btn-surface shrink-0 px-2.5 py-1 text-[12px] disabled:opacity-40"
+                  title={available ? 'Download this voice' : 'Speech is unavailable'}
+                >
+                  <DownloadIcon size={13} /> Download
+                </button>
+              )}
+            </div>
+          )
+        })}
+        {installed.length === 0 && (
+          <p className="text-[12px] text-sibyl-muted">
+            Download a voice to start — the medium voices (~{formatBytes(63 * 1024 * 1024)}) offer the best
+            quality.
+          </p>
+        )}
+      </div>
+
+      <Toggle
+        label="Auto-speak replies"
+        desc="Read each new reply aloud as soon as it finishes generating."
+        checked={tts.autoSpeak}
+        onChange={(v) => actions.updateTtsSettings({ autoSpeak: v })}
+      />
+      <Slider
+        label="Speaking rate"
+        value={tts.rate}
+        min={0.5}
+        max={2}
+        step={0.05}
+        onChange={(v) => actions.updateTtsSettings({ rate: v })}
+        format={(v) => `${v.toFixed(2)}×`}
+      />
+      <Slider
+        label="Volume"
+        value={tts.volume}
+        min={0}
+        max={1}
+        step={0.05}
+        onChange={(v) => actions.updateTtsSettings({ volume: v })}
+        format={(v) => `${Math.round(v * 100)}%`}
+      />
+
+      {speaking && (
+        <button onClick={() => actions.stopSpeaking()} className="btn-surface w-full justify-center">
+          <StopIcon size={14} /> Stop speaking
+        </button>
+      )}
     </Section>
   )
 }
@@ -400,6 +556,7 @@ export function SettingsView() {
 
           <PersonasSection settings={settings} />
           <GenerationProfilesSection settings={settings} />
+          <VoiceSpeechSection settings={settings} />
 
           <Section title="Downloads" desc="Integrity checks applied to models you download.">
             <Toggle

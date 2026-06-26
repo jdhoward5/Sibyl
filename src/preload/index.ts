@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '@shared/ipc'
-import type { SibylBridge, ChatSendRequest } from '@shared/ipc'
+import type { SibylBridge, ChatSendRequest, TtsSpeakRequest } from '@shared/ipc'
 import type { AppSettings, Conversation } from '@shared/types'
 
 /**
@@ -62,6 +62,19 @@ const bridge: SibylBridge = {
   },
   app: {
     info: () => ipcRenderer.invoke(IPC.appInfo)
+  },
+  tts: {
+    status: () => ipcRenderer.invoke(IPC.ttsStatus),
+    onStatus: (cb) => subscribe(IPC.ttsStatusEvent, cb),
+    listVoices: () => ipcRenderer.invoke(IPC.ttsVoicesList),
+    listDownloads: () => ipcRenderer.invoke(IPC.ttsVoiceDownloads),
+    downloadVoice: (voiceId) => ipcRenderer.invoke(IPC.ttsVoiceDownload, voiceId),
+    cancelVoiceDownload: (voiceId) => ipcRenderer.invoke(IPC.ttsVoiceCancel, voiceId),
+    deleteVoice: (voiceId) => ipcRenderer.invoke(IPC.ttsVoiceDelete, voiceId),
+    onVoiceProgress: (cb) => subscribe(IPC.ttsVoiceProgress, cb),
+    speak: (req: TtsSpeakRequest) => ipcRenderer.invoke(IPC.ttsSpeak, req),
+    stop: () => ipcRenderer.invoke(IPC.ttsStop),
+    onEvent: (cb) => subscribe(IPC.ttsEvent, cb)
   },
   update: {
     check: () => ipcRenderer.invoke(IPC.updateCheck),

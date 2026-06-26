@@ -43,11 +43,20 @@ files:
   - "!**/node_modules/node-llama-cpp/llama/localBuilds/*/cmake_install.cmake"
   - "!**/node_modules/node-llama-cpp/llama/localBuilds/*/Makefile"
   - "!**/node_modules/node-llama-cpp/llama/localBuilds/*/compile_commands.json"
-# node-llama-cpp ships native .node bindings and prebuilt llama.cpp binaries
-# that must be kept outside the asar archive so they can be dlopen-ed at runtime.
+  # onnxruntime-node (Piper TTS) bundles native binaries for every platform in one
+  # package (~260 MB). Drop the ones this build can never load: Linux always, and
+  # win-arm64 (we ship x64 Windows). The remaining per-platform split (darwin vs
+  # win32/x64) is trimmed in the `mac:`/`win:` sections below. `napi-v*` keeps the
+  # globs resilient to the bundled N-API ABI version changing across releases.
+  - "!**/node_modules/onnxruntime-node/bin/napi-v*/linux/**"
+  - "!**/node_modules/onnxruntime-node/bin/napi-v*/win32/arm64/**"
+# node-llama-cpp + onnxruntime-node ship native .node bindings and shared libs
+# (llama.cpp backends / libonnxruntime) that must be kept outside the asar archive
+# so they can be dlopen-ed at runtime.
 asarUnpack:
   - node_modules/node-llama-cpp/**/*
   - node_modules/@node-llama-cpp/**/*
+  - node_modules/onnxruntime-node/**/*
 # We build only the unpacked app dir here (`electron-builder --win --dir`);
 # `scripts/squirrel.mjs` (electron-winstaller) wraps it into the Squirrel.Windows
 # installer + update package. So no NSIS/installer target, and no electron-updater
@@ -55,6 +64,9 @@ asarUnpack:
 # straight from GitHub releases (see src/main/updater.ts).
 win:
   icon: build/icon.ico
+  # This is an x64 Windows build — it never loads the macOS onnxruntime binary.
+  files:
+    - "!**/node_modules/onnxruntime-node/bin/napi-v*/darwin/**"
 # macOS build. Unlike Windows there's no Squirrel step — electron-builder emits the
 # distributable (.dmg + .zip) directly. Apple Silicon (arm64) only: the shipped
 # node-llama-cpp backend is @node-llama-cpp/mac-arm64-metal (Metal GPU). Intel Macs
@@ -72,6 +84,9 @@ mac:
   hardenedRuntime: false
   gatekeeperAssess: false
   artifactName: ${productName}-${version}-${arch}.${ext}
+  # This is an arm64 macOS build — it never loads the Windows onnxruntime binary.
+  files:
+    - "!**/node_modules/onnxruntime-node/bin/napi-v*/win32/**"
   target:
     - target: dmg
       arch: arm64

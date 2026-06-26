@@ -16,8 +16,10 @@ import type {
 } from '@shared/types'
 import type { AppInfo } from '@shared/ipc'
 import type { ExportFormat } from '@shared/export'
+import type { InstalledVoice, TtsSettings, TtsStatus, TtsVoiceDownload } from '@shared/tts'
 import { getAccentTheme, hexToRgbChannels } from '@shared/themes'
 import { findPersona } from '@shared/personas'
+import { ttsPlayer } from './lib/ttsPlayer'
 
 /** Paint the selected accent theme onto documentElement as CSS variables. */
 function applyAccentTheme(key: string | null | undefined): void {
@@ -63,6 +65,14 @@ export interface AppState {
   toast: { id: number; kind: 'info' | 'error' | 'success'; message: string } | null
   /** True while the new-thread persona picker is shown over the chat column. */
   personaPickerOpen: boolean
+  /** Speech-subsystem status (availability), or null before the first snapshot. */
+  tts: TtsStatus | null
+  /** Voices downloaded and registered on disk. */
+  installedVoices: InstalledVoice[]
+  /** In-flight voice downloads, keyed by voice id. */
+  voiceDownloads: Record<string, TtsVoiceDownload>
+  /** The message currently being spoken aloud, or null. Driven by the audio player. */
+  speakingMessageId: string | null
 }
 
 const initialState: AppState = {
@@ -96,7 +106,11 @@ const initialState: AppState = {
   streamStats: null,
   update: null,
   toast: null,
-  personaPickerOpen: false
+  personaPickerOpen: false,
+  tts: null,
+  installedVoices: [],
+  voiceDownloads: {},
+  speakingMessageId: null
 }
 
 let state: AppState = initialState
@@ -156,6 +170,33 @@ function updateConversation(id: string, fn: (c: Conversation) => Conversation): 
 
 function persist(conversation: Conversation): void {
   void window.sibyl.conversations.save(conversation)
+}
+
+/**
+ * Whether speech can run right now: enabled, the runtime is available, and an
+ * installed voice is selected. Returns a reason string when it can't.
+ */
+function ttsReadiness(): { ok: true; voiceId: string } | { ok: false; reason: string } {
+  const s = state.settings?.tts
+  if (!s?.enabled) return { ok: false, reason: 'Enable speech in Settings → Voice & speech.' }
+  if (!state.tts?.available) {
+    return { ok: false, reason: state.tts?.error ?? 'Speech is unavailable in this build.' }
+  }
+  if (!s.voiceId || !state.installedVoices.some((v) => v.id === s.voiceId)) {
+    return { ok: false, reason: 'Choose a voice in Settings → Voice & speech.' }
+  }
+  return { ok: true, voiceId: s.voiceId }
+}
+
+/** Whether the speak control should be shown on assistant messages. */
+export function canSpeak(s: AppState): boolean {
+  const t = s.settings?.tts
+  return Boolean(
+    t?.enabled &&
+      s.tts?.available &&
+      t.voiceId &&
+      s.installedVoices.some((v) => v.id === t.voiceId)
+  )
 }
 
 /**
@@ -225,7 +266,7 @@ export const actions = {
     if (initialized) return
     initialized = true
 
-    const [settingsRes, infoRes, modelsRes, convRes, statusRes, dlRes, updateRes] =
+    const [settingsRes, infoRes, modelsRes, convRes, statusRes, dlRes, updateRes, ttsRes, voicesRes, voiceDlRes] =
       await Promise.all([
         window.sibyl.settings.get(),
         window.sibyl.app.info(),
@@ -233,11 +274,16 @@ export const actions = {
         window.sibyl.conversations.list(),
         window.sibyl.engine.status(),
         window.sibyl.downloads.list(),
-        window.sibyl.update.status()
+        window.sibyl.update.status(),
+        window.sibyl.tts.status(),
+        window.sibyl.tts.listVoices(),
+        window.sibyl.tts.listDownloads()
       ])
 
     const downloads: Record<string, DownloadProgress> = {}
     if (dlRes.ok && dlRes.data) for (const d of dlRes.data) downloads[d.id] = d
+    const voiceDownloads: Record<string, TtsVoiceDownload> = {}
+    if (voiceDlRes.ok && voiceDlRes.data) for (const d of voiceDlRes.data) voiceDownloads[d.voiceId] = d
 
     setState({
       ready: true,
@@ -248,8 +294,15 @@ export const actions = {
       engine: statusRes.data ?? state.engine,
       downloads,
       update: updateRes.data ?? null,
-      activeConversationId: convRes.data?.[0]?.id ?? null
+      activeConversationId: convRes.data?.[0]?.id ?? null,
+      tts: ttsRes.data ?? null,
+      installedVoices: voicesRes.data ?? [],
+      voiceDownloads
     })
+
+    // Wire the audio player: it is the source of truth for what's audibly speaking.
+    ttsPlayer.init({ onSpeakingChange: (id) => setState({ speakingMessageId: id }) })
+    ttsPlayer.setVolume(state.settings?.tts.volume ?? 1)
 
     if (state.settings?.theme) document.documentElement.classList.toggle('light', state.settings.theme === 'light')
     applyAccentTheme(state.settings?.accent)
@@ -267,6 +320,33 @@ export const actions = {
       }
     })
     window.sibyl.engine.onStatus((s) => setState({ engine: s }))
+    // TTS: availability status, streamed audio, and voice-download progress.
+    window.sibyl.tts.onStatus((s) => setState({ tts: s }))
+    window.sibyl.tts.onEvent((e) => {
+      // Synthesis failures arrive as an event (speak() itself is fire-and-forget),
+      // so surface them here — otherwise speech would just stop with no explanation.
+      if (e.type === 'error') toast(e.error, 'error')
+      ttsPlayer.handleEvent(e)
+    })
+    window.sibyl.tts.onVoiceProgress((p) => {
+      // Terminal states drop the entry so the row returns to its idle (Download)
+      // state; only an active download keeps a live entry.
+      if (p.status === 'downloading') {
+        setState((st) => ({ voiceDownloads: { ...st.voiceDownloads, [p.voiceId]: p } }))
+        return
+      }
+      setState((st) => {
+        const next = { ...st.voiceDownloads }
+        delete next[p.voiceId]
+        return { voiceDownloads: next }
+      })
+      if (p.status === 'completed') {
+        toast('Voice installed', 'success')
+        void actions.refreshVoices()
+      } else if (p.status === 'error') {
+        toast(p.error ?? 'Voice download failed', 'error')
+      }
+    })
     window.sibyl.context.onUsage((u) => {
       // Only adopt snapshots for the conversation currently on screen; the engine
       // also broadcasts a null-conversation snapshot on load that must not clobber
@@ -306,6 +386,7 @@ export const actions = {
           }
         })
       } else if (e.type === 'done') {
+        let finishedText = ''
         updateConversation(e.conversationId, (c) => {
           const updated = {
             ...c,
@@ -314,10 +395,13 @@ export const actions = {
               m.id === e.messageId ? { ...m, stats: e.stats, error: undefined } : m
             )
           }
+          finishedText = updated.messages.find((m) => m.id === e.messageId)?.content ?? ''
           persist(updated)
           return updated
         })
         setState({ streamStats: null })
+        // Auto-speak the freshly completed assistant reply, when enabled.
+        actions.maybeAutoSpeak(e.messageId, finishedText)
       } else if (e.type === 'error') {
         updateConversation(e.conversationId, (c) => {
           const updated = {
@@ -502,6 +586,12 @@ export const actions = {
         toast('Context was full — older messages were summarized', 'info')
         conv = state.conversations.find((c) => c.id === conversationId) ?? conv
       }
+    }
+
+    // Pre-warm the audio context inside this send gesture so an auto-spoken reply
+    // can start later (when generation finishes) without its own user gesture.
+    if (state.settings?.tts.enabled && state.settings.tts.autoSpeak && ttsReadiness().ok) {
+      ttsPlayer.ensureContext()
     }
 
     const userMsg: ChatMessage = { id: uid(), role: 'user', content, createdAt: now() }
@@ -770,9 +860,86 @@ export const actions = {
       setState({ settings: res.data })
       if (patch.theme) document.documentElement.classList.toggle('light', patch.theme === 'light')
       if (patch.accent) applyAccentTheme(patch.accent)
+      if (patch.tts?.volume !== undefined) ttsPlayer.setVolume(patch.tts.volume)
     } else {
       toast(res.error ?? 'Failed to save settings', 'error')
     }
+  },
+
+  // --- text-to-speech -----------------------------------------------------
+  /** Merge a patch into the TTS settings (and persist). */
+  updateTtsSettings(patch: Partial<TtsSettings>): void {
+    const cur = state.settings?.tts
+    if (!cur) return
+    void actions.updateSettings({ tts: { ...cur, ...patch } })
+  },
+
+  async refreshVoices(): Promise<void> {
+    const res = await window.sibyl.tts.listVoices()
+    if (res.ok) setState({ installedVoices: res.data ?? [] })
+  },
+
+  downloadVoice(voiceId: string): void {
+    void window.sibyl.tts.downloadVoice(voiceId)
+    toast('Downloading voice…', 'info')
+  },
+
+  cancelVoiceDownload(voiceId: string): void {
+    void window.sibyl.tts.cancelVoiceDownload(voiceId)
+  },
+
+  async deleteVoice(voiceId: string): Promise<void> {
+    if (state.speakingMessageId) actions.stopSpeaking()
+    await window.sibyl.tts.deleteVoice(voiceId)
+    await actions.refreshVoices()
+    // Clear the selection if we removed the active voice.
+    if (state.settings?.tts.voiceId === voiceId) {
+      actions.updateTtsSettings({ voiceId: null })
+    }
+    toast('Voice removed', 'info')
+  },
+
+  /** Speak a message aloud (manual play). Must run inside a click handler. */
+  async speakMessage(messageId: string, text: string): Promise<void> {
+    const ready = ttsReadiness()
+    if (!ready.ok) {
+      toast(ready.reason, 'info')
+      return
+    }
+    // Create/resume the AudioContext within this user gesture so audio can start.
+    ttsPlayer.ensureContext()
+    const res = await window.sibyl.tts.speak({ messageId, text })
+    if (!res.ok) toast(res.error ?? 'Failed to start speech', 'error')
+  },
+
+  stopSpeaking(): void {
+    ttsPlayer.stop()
+    void window.sibyl.tts.stop()
+  },
+
+  /** Play a short sample with a specific installed voice (ignores the enabled flag). */
+  async testVoice(voiceId: string): Promise<void> {
+    if (!state.tts?.available) {
+      toast(state.tts?.error ?? 'Speech is unavailable in this build.', 'info')
+      return
+    }
+    ttsPlayer.ensureContext()
+    const voice = state.installedVoices.find((v) => v.id === voiceId)
+    const res = await window.sibyl.tts.speak({
+      messageId: '__tts_test__',
+      text: `Hello, I'm ${voice?.name ?? 'your selected voice'}. This is how I sound in Sibyl.`,
+      voiceId
+    })
+    if (!res.ok) toast(res.error ?? 'Failed to play a sample', 'error')
+  },
+
+  /** Auto-speak a freshly completed reply when the setting is on. */
+  maybeAutoSpeak(messageId: string, text: string): void {
+    const s = state.settings?.tts
+    if (!s?.enabled || !s.autoSpeak || !text.trim()) return
+    if (!ttsReadiness().ok) return
+    ttsPlayer.ensureContext()
+    void window.sibyl.tts.speak({ messageId, text })
   },
 
   // --- auto-update --------------------------------------------------------

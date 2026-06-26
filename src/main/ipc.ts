@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { promises as fs } from 'node:fs'
 import type { IpcMainInvokeEvent } from 'electron'
-import { IPC, type AppInfo, type ChatSendRequest } from '@shared/ipc'
+import { IPC, type AppInfo, type ChatSendRequest, type TtsSpeakRequest } from '@shared/ipc'
 import { buildExport, exportFileBaseName, type ExportFormat } from '@shared/export'
 import type {
   AppSettings,
@@ -14,7 +14,9 @@ import type {
 import { getModelDetail, searchModels, type SortKey } from './hf'
 import { downloadManager } from './downloads'
 import { engine } from './engine'
+import { tts } from './tts'
 import { updater } from './updater'
+import type { TtsEvent, TtsStatus, TtsVoiceDownload } from '@shared/tts'
 import {
   deleteConversation,
   getConversation,
@@ -24,6 +26,7 @@ import {
   isSecureStorageAvailable,
   listConversations,
   listInstalledModels,
+  listInstalledVoices,
   removeInstalledModel,
   saveConversation,
   setSettings
@@ -186,6 +189,28 @@ export function registerIpc(): void {
     }
   })
 
+  // --- Text-to-speech -----------------------------------------------------
+  handle(IPC.ttsStatus, async () => tts.status())
+  handle(IPC.ttsVoicesList, async () => listInstalledVoices())
+  handle(IPC.ttsVoiceDownloads, async () => tts.listVoiceDownloads())
+  handle(IPC.ttsVoiceDownload, async (_e, voiceId: string) => {
+    // Fire-and-forget; progress flows over IPC.ttsVoiceProgress.
+    void tts.downloadVoice(String(voiceId))
+  })
+  handle(IPC.ttsVoiceCancel, async (_e, voiceId: string) => {
+    tts.cancelVoiceDownload(String(voiceId))
+  })
+  handle(IPC.ttsVoiceDelete, async (_e, voiceId: string) => {
+    await tts.deleteVoice(String(voiceId))
+  })
+  handle(IPC.ttsSpeak, async (_e, req: TtsSpeakRequest) => {
+    // Privacy: req.text is message content — synthesized locally, never logged.
+    void tts.speak(req.messageId, req.text, { voiceId: req.voiceId, rate: req.rate })
+  })
+  handle(IPC.ttsStop, async () => {
+    tts.stop()
+  })
+
   // --- Auto-update --------------------------------------------------------
   handle(IPC.updateCheck, async () => updater.check())
   handle(IPC.updateInstall, async () => {
@@ -198,5 +223,8 @@ export function registerIpc(): void {
   engine.on('event', (e: GenerationEvent) => broadcast(IPC.chatEvent, e))
   engine.on('status', (s: EngineStatus) => broadcast(IPC.engineStatusEvent, s))
   engine.on('context', (u: ContextUsage) => broadcast(IPC.contextEvent, u))
+  tts.on('event', (e: TtsEvent) => broadcast(IPC.ttsEvent, e))
+  tts.on('status', (s: TtsStatus) => broadcast(IPC.ttsStatusEvent, s))
+  tts.on('voiceProgress', (p: TtsVoiceDownload) => broadcast(IPC.ttsVoiceProgress, p))
   updater.on('status', (s) => broadcast(IPC.updateEvent, s))
 }

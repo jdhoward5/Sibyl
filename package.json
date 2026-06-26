@@ -33,7 +33,9 @@
   },
   "dependencies": {
     "electron-squirrel-startup": "^1.0.1",
-    "node-llama-cpp": "^3.3.0"
+    "node-llama-cpp": "^3.3.0",
+    "onnxruntime-node": "^1.27.0",
+    "phonemizer": "^1.2.1"
   },
   "devDependencies": {
     "@fontsource-variable/geist": "^5.2.9",

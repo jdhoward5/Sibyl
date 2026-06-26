@@ -39,8 +39,10 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
-        // node-llama-cpp ships native bindings and must never be bundled.
-        external: ['node-llama-cpp']
+        // Native/binary-backed deps must never be bundled: node-llama-cpp ships
+        // native bindings; onnxruntime-node (Piper TTS) loads a native .node +
+        // shared lib at runtime.
+        external: ['node-llama-cpp', 'onnxruntime-node']
       }
     },
     resolve: {

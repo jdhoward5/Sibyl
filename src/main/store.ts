@@ -10,6 +10,7 @@ import {
   DEFAULT_GENERATION_OPTIONS,
   DEFAULT_GENERATION_PROFILES
 } from '@shared/types'
+import { DEFAULT_TTS_SETTINGS, type InstalledVoice } from '@shared/tts'
 import { DEFAULT_ACCENT } from '@shared/themes'
 import { DEFAULT_PERSONAS, gradientFor, initialsOf } from '@shared/personas'
 
@@ -121,6 +122,7 @@ function defaultSettings(): AppSettings {
     personas: DEFAULT_PERSONAS.map(clonePersona),
     promptPresets: [],
     generationProfiles: DEFAULT_GENERATION_PROFILES.map((p) => ({ ...p, options: { ...p.options } })),
+    tts: { ...DEFAULT_TTS_SETTINGS },
     telemetry: false
   }
 }
@@ -183,6 +185,7 @@ export async function getSettings(): Promise<AppSettings> {
     generation: { ...base.generation, ...persisted.generation },
     load: { ...base.load, ...persisted.load },
     context: { ...base.context, ...persisted.context },
+    tts: { ...base.tts, ...persisted.tts },
     personas,
     hfToken: decryptToken(persisted.hfTokenEnc),
     telemetry: false
@@ -198,6 +201,7 @@ export async function setSettings(patch: Partial<AppSettings>): Promise<AppSetti
     generation: { ...current.generation, ...(patch.generation ?? {}) },
     load: { ...current.load, ...(patch.load ?? {}) },
     context: { ...current.context, ...(patch.context ?? {}) },
+    tts: { ...current.tts, ...(patch.tts ?? {}) },
     telemetry: false
   }
 
@@ -222,6 +226,7 @@ export async function setSettings(patch: Partial<AppSettings>): Promise<AppSetti
     personas: next.personas,
     promptPresets: next.promptPresets,
     generationProfiles: next.generationProfiles,
+    tts: next.tts,
     telemetry: false,
     hfTokenEnc
   }
@@ -303,6 +308,56 @@ export async function importLocalModel(filePath: string): Promise<InstalledModel
   }
   await upsertInstalledModel(model)
   return model
+}
+
+// ---------------------------------------------------------------------------
+// TTS voice registry
+// ---------------------------------------------------------------------------
+
+/** Directory holding downloaded Piper voice models (.onnx + .onnx.json). */
+export function voicesDir(): string {
+  return path.join(userDataDir(), 'tts', 'voices')
+}
+
+export async function getVoicesDir(): Promise<string> {
+  const dir = voicesDir()
+  await ensureDir(dir)
+  return dir
+}
+
+function voicesRegistryPath(): string {
+  return path.join(userDataDir(), 'tts', 'voices.json')
+}
+
+export async function listInstalledVoices(): Promise<InstalledVoice[]> {
+  const voices = await readJSON<InstalledVoice[]>(voicesRegistryPath(), [])
+  // Drop entries whose model file no longer exists on disk.
+  const alive = voices.filter((v) => existsSync(v.modelPath) && existsSync(v.configPath))
+  if (alive.length !== voices.length) {
+    await atomicWrite(voicesRegistryPath(), JSON.stringify(alive, null, 2))
+  }
+  return alive
+}
+
+export async function upsertInstalledVoice(voice: InstalledVoice): Promise<void> {
+  const voices = await readJSON<InstalledVoice[]>(voicesRegistryPath(), [])
+  const idx = voices.findIndex((v) => v.id === voice.id)
+  if (idx >= 0) voices[idx] = voice
+  else voices.push(voice)
+  await atomicWrite(voicesRegistryPath(), JSON.stringify(voices, null, 2))
+}
+
+export async function getInstalledVoice(id: string): Promise<InstalledVoice | null> {
+  const voices = await listInstalledVoices()
+  return voices.find((v) => v.id === id) ?? null
+}
+
+export async function removeInstalledVoice(id: string): Promise<InstalledVoice | null> {
+  const voices = await readJSON<InstalledVoice[]>(voicesRegistryPath(), [])
+  const target = voices.find((v) => v.id === id) ?? null
+  const next = voices.filter((v) => v.id !== id)
+  await atomicWrite(voicesRegistryPath(), JSON.stringify(next, null, 2))
+  return target
 }
 
 // ---------------------------------------------------------------------------

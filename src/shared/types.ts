@@ -2,6 +2,7 @@
 // Keep this file free of any runtime/node imports — it must be safe to load in the renderer.
 
 import type { AccentThemeKey } from './themes'
+import type { TtsSettings } from './tts'
 
 export interface HFModelSummary {
   id: string // e.g. "bartowski/Llama-3.2-3B-Instruct-GGUF"
@@ -313,6 +314,8 @@ export interface AppSettings {
   promptPresets: SystemPromptPreset[]
   /** Reusable named generation-parameter bundles (built-ins + user-defined). */
   generationProfiles: GenerationProfile[]
+  /** On-device text-to-speech (Piper) preferences. */
+  tts: TtsSettings
   telemetry: false // Sibyl never sends telemetry.
 }
 

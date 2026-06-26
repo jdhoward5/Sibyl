@@ -5,12 +5,15 @@ locally via `node-llama-cpp`. Stack: electron-vite + React + TS + Tailwind.
 
 ## Layout
 - `src/shared/` — types + IPC contract + pure helpers. **No node/electron imports**
-  (loaded by the renderer). Unit-tested (`format.test.ts`).
-- `src/main/` — Electron main. `engine.ts` (inference), `downloads.ts`, `hf.ts`,
-  `store.ts` (persistence), `llama.ts` (backend), `ipc.ts` (router), `index.ts`.
+  (loaded by the renderer). Unit-tested (`format.test.ts`, `tts.test.ts`).
+  `tts.ts` = TTS types + Piper voice catalog + pure phoneme→id / markdown→speech.
+- `src/main/` — Electron main. `engine.ts` (inference), `tts.ts` (Piper speech),
+  `downloads.ts`, `hf.ts`, `store.ts` (persistence), `llama.ts` (backend),
+  `ipc.ts` (router), `index.ts`.
 - `src/preload/index.ts` — the only renderer capability: `window.sibyl` bridge.
 - `src/renderer/src/` — React UI. State in `store.ts` (custom external store,
-  `useSyncExternalStore`), components by feature, `lib/markdown.tsx` (safe).
+  `useSyncExternalStore`), components by feature, `lib/markdown.tsx` (safe),
+  `lib/ttsPlayer.ts` (Web Audio playback queue for streamed speech).
 
 ## Conventions / invariants
 - IPC handlers return `Result<T>` (`{ ok, data?, error? }`); they never throw
@@ -34,6 +37,38 @@ locally via `node-llama-cpp`. Stack: electron-vite + React + TS + Tailwind.
   `src/privacy.test.ts` enforces both rules statically; the renderer→main console
   forwarder is dev-only (`isDev`). The app sends no telemetry and starts no crash
   reporter.
+  - **TTS is in-scope of this rule.** The text handed to `tts.speak` (the message
+    `content`) and the synthesized audio are private. Synthesis runs on-device and
+    the audio only ever flows main→renderer for local playback — never log the
+    spoken text, the PCM, or anything derived from it.
+
+## Text-to-speech (Piper, on-device)
+- Speaks AI replies with **local neural voices** (Piper / VITS). A voice is an
+  ONNX model + a tiny `.onnx.json` config downloaded from Hugging Face's
+  `rhasspy/piper-voices` repo into `userData/tts/voices` (registry: `voices.json`).
+  A curated catalog lives in `src/shared/tts.ts` (`TTS_VOICE_CATALOG`).
+- **Pipeline** (`src/main/tts.ts`): text → `plainTextForSpeech` (strip markdown) →
+  `phonemize` (the `phonemizer` package = espeak-ng WASM → IPA, per sentence) →
+  `phonemesToIds` (Piper convention: BOS, PAD-interleaved, EOS) → **onnxruntime-node**
+  (`input`/`input_lengths`/`scales` [+`sid` if multi-speaker] → `output`) → mono
+  Float32 PCM. Synthesized **sentence-by-sentence** and streamed to the renderer as
+  `tts:event` chunks; `lib/ttsPlayer.ts` decodes each into an AudioBuffer and
+  schedules them gaplessly. The player (not main) is the source of truth for what's
+  *audibly* speaking — synthesis finishes before playback does.
+- `length_scale = config.length_scale / rate`; each voice carries its own
+  `sample_rate` (16 k or 22.05 k) — the renderer builds the AudioBuffer at that rate
+  and Web Audio resamples. One ONNX session is cached + reused; speak requests are
+  **serialized** through a promise chain so the model is never run (or a session
+  disposed) by two requests at once. `tts.dispose()` runs first in `teardownGpu()`.
+- **Native dep**: `onnxruntime-node` (lazy `import()`, externalized like
+  node-llama-cpp; graceful `available:false` if it can't load). `phonemizer` is
+  pure JS with the espeak-ng WASM embedded as base64 (no asset to unpack). Probe
+  availability via `tts.status()`; the renderer hides speech controls when
+  unavailable. **Cross-platform** (Windows + macOS), CPU execution provider.
+- **Packaging**: `electron-builder.yml` `asarUnpack`s `onnxruntime-node` (native
+  `.node` + `libonnxruntime`) and trims its bundled binaries for platforms this
+  build can't load (Linux + win-arm64 always; darwin on the Windows build, win32 on
+  the mac build) — the package ships all platforms in one (~260 MB).
 
 ## CUDA / GPU
 - The prebuilt CUDA backend (`@node-llama-cpp/win-x64-cuda`, llama.cpp **b8390**)
