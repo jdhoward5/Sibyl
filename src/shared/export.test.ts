@@ -53,6 +53,31 @@ describe('conversationToMarkdown', () => {
   })
 })
 
+describe('scene attribution', () => {
+  const scene: Conversation = {
+    id: 'sc',
+    title: 'Standoff',
+    modelId: 'm1',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:01:00.000Z',
+    cast: ['a', 'b'],
+    messages: [
+      { id: 'd1', role: 'user', content: 'raise the stakes', createdAt: '', director: true },
+      { id: 'b1', role: 'assistant', content: 'I hold the line.', createdAt: '', speakerId: 'a', speakerName: 'Ada' },
+      { id: 'b2', role: 'assistant', content: 'Not today.', createdAt: '', speakerId: 'b', speakerName: 'Bo' },
+      { id: 'u1', role: 'user', content: 'I step between them.', createdAt: '' }
+    ]
+  }
+  it('labels beats by speaker, director notes as Director, and the human as You', () => {
+    const md = conversationToMarkdown(scene)
+    expect(md).toContain('**Ada:**')
+    expect(md).toContain('**Bo:**')
+    expect(md).toContain('**Director:**')
+    expect(md).toContain('**You:**')
+    expect(md).not.toContain('**Sibyl:**')
+  })
+})
+
 describe('conversationToText', () => {
   it('renders plain role-prefixed lines without markdown', () => {
     const txt = conversationToText(conv)

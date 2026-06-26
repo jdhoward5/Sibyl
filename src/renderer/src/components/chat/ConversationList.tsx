@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { actions, useStore } from '../../store'
 import { findPersona } from '@shared/personas'
-import { isScene } from '@shared/scene'
+import { isScene, sceneCast } from '@shared/scene'
 import { PlusIcon, TrashIcon, EditIcon, SearchIcon } from '../../lib/icons'
 
 /** First message snippet around a match, for the search results. */
@@ -77,7 +77,7 @@ export function ConversationList() {
           const persona = findPersona(personas, c.personaId)
           const scene = isScene(c)
           const lead = scene
-            ? `Scene · ${c.cast!.length} cast`
+            ? `Scene · ${sceneCast(c, personas).length} cast`
             : (persona?.name ?? 'Blank')
           const turns = scene
             ? c.messages.filter((m) => m.role === 'assistant').length

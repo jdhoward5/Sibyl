@@ -182,6 +182,14 @@ export function buildBeatPrompt(params: {
     history = items
   }
 
+  // Keep the seeded history user-first. On a speaker's 2nd+ beat their own prior
+  // line leads as a `model` turn; some chat templates (e.g. Gemma, which folds the
+  // system prompt into the first user turn) assume the first turn after system is
+  // a user turn. A tiny cue turn keeps the structure valid without distorting content.
+  if (history.length && history[0].role === 'model') {
+    history = [{ role: 'user', text: '(The scene so far.)' }, ...history]
+  }
+
   // Catch the model running on into another character's turn.
   const names = new Set<string>()
   for (const c of cast) if (c.id !== speaker.id) names.add(c.name)

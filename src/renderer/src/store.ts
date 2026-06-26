@@ -19,7 +19,7 @@ import type { ExportFormat } from '@shared/export'
 import type { InstalledVoice, TtsSettings, TtsStatus, TtsVoiceDownload } from '@shared/tts'
 import { getAccentTheme, hexToRgbChannels } from '@shared/themes'
 import { findPersona } from '@shared/personas'
-import { isScene, nextSpeakerId, stripSpeakerPrefix, MIN_SCENE_CAST } from '@shared/scene'
+import { isScene, sceneCast, nextSpeakerId, stripSpeakerPrefix, MIN_SCENE_CAST } from '@shared/scene'
 import { ttsPlayer } from './lib/ttsPlayer'
 
 /** Paint the selected accent theme onto documentElement as CSS variables. */
@@ -162,6 +162,11 @@ function clearSceneTimer(): void {
   if (sceneTimer) clearTimeout(sceneTimer)
   sceneTimer = null
 }
+// Synchronous in-flight guard: set the instant we commit to a beat, cleared when
+// that beat's done/error event arrives. `state.engine.state` is a mirror updated a
+// full IPC round-trip late, so it can't stop two advances firing in the inter-beat
+// gap (autoplay tick + a Composer speak/direct) — this can.
+let beatInFlight = false
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 function toast(message: string, kind: 'info' | 'error' | 'success' = 'info'): void {
@@ -202,6 +207,17 @@ function ttsReadiness(): { ok: true; voiceId: string } | { ok: false; reason: st
     return { ok: false, reason: 'Choose a voice in Settings → Voice & speech.' }
   }
   return { ok: true, voiceId: s.voiceId }
+}
+
+/**
+ * Pre-warm the audio context from within a user gesture (a send/play click) so a
+ * later auto-spoken reply can start without its own gesture — the browser's
+ * autoplay policy blocks `resume()` outside a gesture.
+ */
+function maybePrewarmAudio(): void {
+  if (state.settings?.tts.enabled && state.settings.tts.autoSpeak && ttsReadiness().ok) {
+    ttsPlayer.ensureContext()
+  }
 }
 
 /** Whether the speak control should be shown on assistant messages. */
@@ -402,6 +418,7 @@ export const actions = {
           }
         })
       } else if (e.type === 'done') {
+        beatInFlight = false // beat finished — the next advance may proceed
         let finishedText = ''
         updateConversation(e.conversationId, (c) => {
           const messages = c.messages.map((m) => {
@@ -422,6 +439,7 @@ export const actions = {
         // Drive scene autoplay forward to the next character's beat.
         if (state.scenePlay?.convId === e.conversationId) actions.scheduleNextBeat()
       } else if (e.type === 'error') {
+        beatInFlight = false // beat failed — release the in-flight guard
         updateConversation(e.conversationId, (c) => {
           const updated = {
             ...c,
@@ -550,6 +568,7 @@ export const actions = {
 
   /** Generate one beat. `speakerId` overrides the round-robin pick. */
   async advanceScene(speakerId?: string): Promise<void> {
+    if (beatInFlight) return // a beat is already in flight (synchronous guard)
     if (!state.engine.modelId) {
       toast('Load a model before playing a scene.', 'error')
       if (state.scenePlay) actions.stopScenePlay()
@@ -558,53 +577,70 @@ export const actions = {
     if (state.engine.state === 'generating') return
     let conv = activeConversation()
     if (!conv || !isScene(conv)) return
-    const conversationId = conv.id
     const personas = state.settings?.personas
+    // A scene needs ≥2 *resolvable* characters; some of the cast may have been
+    // deleted from the library, which would otherwise leave a one-voice monologue.
+    if (sceneCast(conv, personas).length < MIN_SCENE_CAST) {
+      toast('This scene needs at least two available characters.', 'error')
+      if (state.scenePlay) actions.stopScenePlay()
+      return
+    }
+    const conversationId = conv.id
     const sid = speakerId ?? nextSpeakerId(conv, personas)
     if (!sid) {
-      toast('Add at least two characters to the scene.', 'error')
       if (state.scenePlay) actions.stopScenePlay()
       return
     }
 
-    // Auto-compaction: summarize older beats before the window overflows so the
-    // scene can run long without truncating the next reply.
-    const ctx = state.contextUsage
-    const cset = state.settings?.context
-    if (
-      cset?.autoCompact &&
-      ctx &&
-      ctx.contextSize > 0 &&
-      (ctx.willOverflow || ctx.fraction >= cset.compactThreshold)
-    ) {
-      const did = await actions.compact(conversationId, { silent: true })
-      if (did) conv = state.conversations.find((c) => c.id === conversationId) ?? conv
-    }
+    // Commit: block any concurrent advance until this beat's done/error arrives.
+    beatInFlight = true
+    try {
+      // Auto-compaction: summarize older beats before the window overflows so the
+      // scene can run long without truncating the next reply.
+      const ctx = state.contextUsage
+      const cset = state.settings?.context
+      if (
+        cset?.autoCompact &&
+        ctx &&
+        ctx.contextSize > 0 &&
+        (ctx.willOverflow || ctx.fraction >= cset.compactThreshold)
+      ) {
+        const did = await actions.compact(conversationId, { silent: true })
+        if (did) conv = state.conversations.find((c) => c.id === conversationId) ?? conv
+      }
 
-    const persona = findPersona(personas, sid)
-    const beat: ChatMessage = {
-      id: uid(),
-      role: 'assistant',
-      content: '',
-      createdAt: now(),
-      speakerId: sid,
-      speakerName: persona?.name
-    }
-    let saved: Conversation | null = null
-    updateConversation(conversationId, (c) => {
-      saved = { ...c, modelId: state.engine.modelId, messages: [...c.messages, beat], updatedAt: now() }
-      return saved
-    })
-    if (saved) await window.sibyl.conversations.save(saved)
-    // The active speaker (and system prompt) changed — force a fresh rebuild.
-    await window.sibyl.chat.invalidateSession(conversationId)
-    const res = await window.sibyl.chat.advance({
-      conversationId,
-      speakerId: sid,
-      assistantMessageId: beat.id
-    })
-    if (!res.ok) {
-      toast(res.error ?? 'Failed to advance the scene', 'error')
+      const persona = findPersona(personas, sid)
+      const beat: ChatMessage = {
+        id: uid(),
+        role: 'assistant',
+        content: '',
+        createdAt: now(),
+        speakerId: sid,
+        speakerName: persona?.name
+      }
+      let saved: Conversation | null = null
+      updateConversation(conversationId, (c) => {
+        saved = { ...c, modelId: state.engine.modelId, messages: [...c.messages, beat], updatedAt: now() }
+        return saved
+      })
+      if (saved) await window.sibyl.conversations.save(saved)
+      // The active speaker (and system prompt) changed — force a fresh rebuild.
+      await window.sibyl.chat.invalidateSession(conversationId)
+      const res = await window.sibyl.chat.advance({
+        conversationId,
+        speakerId: sid,
+        assistantMessageId: beat.id
+      })
+      // On success the latch clears when the beat's done/error event arrives;
+      // a failed kickoff produces no such event, so release it here.
+      if (!res.ok) {
+        beatInFlight = false
+        toast(res.error ?? 'Failed to advance the scene', 'error')
+        if (state.scenePlay) actions.stopScenePlay()
+      }
+    } catch (err) {
+      beatInFlight = false
+      toast(err instanceof Error ? err.message : 'Failed to advance the scene', 'error')
       if (state.scenePlay) actions.stopScenePlay()
     }
   },
@@ -616,6 +652,7 @@ export const actions = {
     if (state.engine.state === 'generating') return
     const conv = activeConversation()
     if (!conv || !isScene(conv)) return
+    maybePrewarmAudio() // still inside the submit gesture
     const msg: ChatMessage = { id: uid(), role: 'user', content, createdAt: now() }
     let saved: Conversation | null = null
     updateConversation(conv.id, (c) => {
@@ -634,6 +671,7 @@ export const actions = {
     if (state.engine.state === 'generating') return
     const conv = activeConversation()
     if (!conv || !isScene(conv)) return
+    maybePrewarmAudio() // still inside the submit gesture
     const note: ChatMessage = { id: uid(), role: 'user', content, createdAt: now(), director: true }
     let saved: Conversation | null = null
     updateConversation(conv.id, (c) => {
@@ -653,6 +691,7 @@ export const actions = {
       toast('Load a model before playing a scene.', 'error')
       return
     }
+    maybePrewarmAudio() // Play is a user gesture — warm audio for narrated beats
     setState({ scenePlay: { convId: conv.id } })
     actions.tickScenePlay()
   },
@@ -674,7 +713,7 @@ export const actions = {
     sceneTimer = setTimeout(() => actions.tickScenePlay(), SCENE_BEAT_DELAY_MS)
   },
 
-  /** Autoplay tick: advance when free, deferring while a beat is being narrated. */
+  /** Autoplay tick: advance when free, otherwise poll until it is. */
   tickScenePlay(): void {
     const play = state.scenePlay
     if (!play) return
@@ -683,9 +722,13 @@ export const actions = {
       actions.stopScenePlay()
       return
     }
-    if (state.engine.state === 'generating') return // a beat is mid-flight; 'done' reschedules
-    // When narrating, let the current line finish speaking before the next beat.
-    if (state.settings?.tts.enabled && state.settings.tts.autoSpeak && state.speakingMessageId) {
+    // Not ready to advance yet — poll again shortly rather than waiting on a
+    // matching 'done' (which never comes if the engine is busy with ANOTHER
+    // conversation, which would otherwise stall the scene). Covers a beat in
+    // flight and waiting for the current line's narration to finish.
+    const narrating =
+      Boolean(state.settings?.tts.enabled && state.settings.tts.autoSpeak && state.speakingMessageId)
+    if (beatInFlight || state.engine.state === 'generating' || narrating) {
       clearSceneTimer()
       sceneTimer = setTimeout(() => actions.tickScenePlay(), 300)
       return
@@ -848,9 +891,7 @@ export const actions = {
 
     // Pre-warm the audio context inside this send gesture so an auto-spoken reply
     // can start later (when generation finishes) without its own user gesture.
-    if (state.settings?.tts.enabled && state.settings.tts.autoSpeak && ttsReadiness().ok) {
-      ttsPlayer.ensureContext()
-    }
+    maybePrewarmAudio()
 
     const userMsg: ChatMessage = { id: uid(), role: 'user', content, createdAt: now() }
     const assistantMsg: ChatMessage = { id: uid(), role: 'assistant', content: '', createdAt: now() }

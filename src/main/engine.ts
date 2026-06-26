@@ -9,12 +9,13 @@ import type {
   EngineStatus,
   GenerationEvent,
   GenerationOptions,
-  InstalledModel
+  InstalledModel,
+  Persona
 } from '@shared/types'
 import { DEFAULT_GENERATION_OPTIONS } from '@shared/types'
 import { contextLevel } from '@shared/context'
 import { findPersona } from '@shared/personas'
-import { buildBeatPrompt, sceneCast, type SceneTurn } from '@shared/scene'
+import { buildBeatPrompt, isScene, nextSpeakerId, sceneCast, type SceneTurn } from '@shared/scene'
 import { getLlamaInstance } from './llama'
 import { getInstalledModel, getSettings, upsertInstalledModel } from './store'
 
@@ -250,13 +251,18 @@ class InferenceEngine extends EventEmitter {
     return prompt
   }
 
-  /** Effective generation options: global → persona → per-conversation override. */
+  /**
+   * Effective generation options: global → persona → per-conversation override.
+   * `personaOverride` lets a scene beat use its active speaker's params instead of
+   * the conversation's single persona.
+   */
   private generationFor(
     conversation: Conversation,
     settings: AppSettings,
-    optionsOverride: Partial<GenerationOptions> | undefined
+    optionsOverride: Partial<GenerationOptions> | undefined,
+    personaOverride?: Persona | null
   ): GenerationOptions {
-    const persona = findPersona(settings.personas, conversation.personaId)
+    const persona = personaOverride ?? findPersona(settings.personas, conversation.personaId)
     return {
       ...DEFAULT_GENERATION_OPTIONS,
       ...settings.generation,
@@ -489,30 +495,28 @@ class InferenceEngine extends EventEmitter {
       return
     }
 
-    const settings = await getSettings()
-    const cast = sceneCast(conversation, settings.personas)
-    const speaker = findPersona(settings.personas, speakerId)
-    if (!speaker) {
-      this.emitEvent({
-        type: 'error',
-        conversationId: conversation.id,
-        messageId: assistantMessageId,
-        error: 'That character is no longer in your persona library.'
-      })
-      return
-    }
-
+    // Latch synchronously — BEFORE any await — so two near-simultaneous advances
+    // can't both pass the busy check above and then run concurrent prompts on the
+    // one shared context sequence (that corrupts the KV cache / crashes the GPU
+    // worker). generate() latches the same way; resolution moves inside the try so
+    // every exit path releases via finally.
     this.beginExclusive()
     let started = 0
     let completionTokens = 0
     try {
-      const opts: GenerationOptions = {
-        ...DEFAULT_GENERATION_OPTIONS,
-        ...settings.generation,
-        ...(speaker.generation ?? {}),
-        ...(conversation.overrides?.generation ?? {}),
-        ...optionsOverride
+      const settings = await getSettings()
+      const cast = sceneCast(conversation, settings.personas)
+      const speaker = findPersona(settings.personas, speakerId)
+      if (!speaker) {
+        this.emitEvent({
+          type: 'error',
+          conversationId: conversation.id,
+          messageId: assistantMessageId,
+          error: 'That character is no longer in your persona library.'
+        })
+        return
       }
+      const opts = this.generationFor(conversation, settings, optionsOverride, speaker)
       const beat = buildBeatPrompt({
         // Honor compaction: feed only the un-folded tail; the summary rides in
         // the system turn below (older turns were condensed to save context).
@@ -568,7 +572,9 @@ class InferenceEngine extends EventEmitter {
         conversationId: conversation.id,
         messageId: assistantMessageId,
         stats: {
-          promptTokens: this.estimatePromptTokens(conversation, beat.prompt),
+          // Prompt size from the exact KV fill (whole prompt incl. system),
+          // not a full re-tokenize of the transcript every beat.
+          promptTokens: Math.max(0, (this.sequence?.nextTokenIndex ?? 0) - completionTokens),
           completionTokens,
           durationMs,
           tokensPerSecond: durationMs > 0 ? (completionTokens / durationMs) * 1000 : 0,
@@ -583,7 +589,7 @@ class InferenceEngine extends EventEmitter {
           conversationId: conversation.id,
           messageId: assistantMessageId,
           stats: {
-            promptTokens: 0,
+            promptTokens: Math.max(0, (this.sequence?.nextTokenIndex ?? 0) - completionTokens),
             completionTokens,
             durationMs,
             tokensPerSecond: durationMs > 0 ? (completionTokens / durationMs) * 1000 : 0,
@@ -652,6 +658,27 @@ class InferenceEngine extends EventEmitter {
    * with a small per-turn allowance for chat-template framing.
    */
   private estimateConversationTokens(conversation: Conversation, settings: AppSettings): number {
+    // Scenes don't use the single-persona system prompt: each beat carries its
+    // speaker's brief + the full roster + name-prefixing. Estimate from the actual
+    // next-beat prompt so auto-compaction triggers before the window overflows.
+    if (isScene(conversation)) {
+      const cast = sceneCast(conversation, settings.personas)
+      const speaker = findPersona(settings.personas, nextSpeakerId(conversation, settings.personas))
+      if (speaker) {
+        const beat = buildBeatPrompt({
+          messages: this.liveMessages(conversation),
+          speaker,
+          cast,
+          userCharacter: conversation.userCharacter,
+          scenePremise: conversation.scenePremise
+        })
+        const summary = conversation.compaction?.summary?.trim()
+        let total = this.tokenCount(beat.system) + (summary ? this.tokenCount(summary) : 0) + 8
+        for (const t of beat.history) total += this.tokenCount(t.text) + 4
+        total += this.tokenCount(beat.prompt) + 4
+        return total
+      }
+    }
     let total = this.tokenCount(this.systemPromptFor(conversation, settings)) + 8
     for (const m of this.liveMessages(conversation)) {
       if (m.role === 'system' || !m.content.trim()) continue
@@ -731,9 +758,12 @@ class InferenceEngine extends EventEmitter {
       const throughMessageId = toFold[toFold.length - 1].id
 
       const priorSummary = conversation.compaction?.summary?.trim()
-      const transcript = toFold
-        .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.trim()}`)
-        .join('\n\n')
+      // Preserve scene attribution: fold beats under their speaker's name and
+      // director notes under "Director", so the summary doesn't collapse a cast
+      // into one voice (it rides in every later beat's system prompt).
+      const foldLabel = (m: ChatMessage): string =>
+        m.director ? 'Director' : m.role === 'user' ? 'User' : m.speakerName?.trim() || 'Assistant'
+      const transcript = toFold.map((m) => `${foldLabel(m)}: ${m.content.trim()}`).join('\n\n')
       const instruction =
         (priorSummary
           ? `Existing summary of the conversation so far:\n${priorSummary}\n\n`

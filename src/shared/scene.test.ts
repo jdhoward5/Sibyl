@@ -113,15 +113,30 @@ describe('buildBeatPrompt', () => {
     const messages = [beat(A, 'Ready.'), beat(B, 'Hold on.')]
     const r = buildBeatPrompt({ messages, speaker: A, cast })
     // From Ada's POV: her line is a model turn; Bo's line is the trailing prompt.
-    expect(r.history).toEqual([{ role: 'model', text: 'Ready.' }])
+    // A leading user cue keeps the history user-first (see user-first test below).
+    expect(r.history).toEqual([
+      { role: 'user', text: '(The scene so far.)' },
+      { role: 'model', text: 'Ready.' }
+    ])
     expect(r.prompt).toBe('Bo: Hold on.')
   })
 
   it('coalesces consecutive other-speaker lines into one user turn', () => {
     const messages = [beat(A, 'One.'), beat(B, 'Two.'), beat(C, 'Three.')]
     const r = buildBeatPrompt({ messages, speaker: A, cast: [A, B, C] })
-    expect(r.history).toEqual([{ role: 'model', text: 'One.' }])
+    expect(r.history).toEqual([
+      { role: 'user', text: '(The scene so far.)' },
+      { role: 'model', text: 'One.' }
+    ])
     expect(r.prompt).toBe('Bo: Two.\nCy: Three.')
+  })
+
+  it('keeps the seeded history user-first (never leads with a model turn)', () => {
+    // Ada speaks twice in a row -> her two lines would lead as model turns.
+    const messages = [beat(A, 'First.'), beat(A, 'Second.')]
+    const r = buildBeatPrompt({ messages, speaker: A, cast })
+    expect(r.history[0]).toEqual({ role: 'user', text: '(The scene so far.)' })
+    expect(r.history.every((t, i) => i === 0 || t.role === 'model')).toBe(true)
   })
 
   it('nudges to continue when the speaker spoke last', () => {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Conversation, Persona } from '@shared/types'
 import { actions, useStore } from '../../store'
 import { formatTokens } from '@shared/context'
@@ -402,6 +402,9 @@ export function ChatView() {
   const persona = findPersona(personas, conversation?.personaId)
   const speaker = persona ? persona.name.split(/\s+/)[0] : 'Sibyl'
   const scene = isScene(conversation)
+  // O(1) per-beat speaker lookup instead of a linear scan per message per render
+  // (ChatView re-renders on every streamed token).
+  const personaById = useMemo(() => new Map(personas.map((p) => [p.id, p])), [personas])
 
   // The picker takes over the column when explicitly opened, or when there's no
   // active thread to show.
@@ -534,7 +537,7 @@ export function ChatView() {
                   {visible.map((m, i) => {
                     // In a scene each beat attributes its own speaker; otherwise the
                     // single persona (or "Sibyl") labels every assistant turn.
-                    const beatPersona = scene ? findPersona(personas, m.speakerId) : null
+                    const beatPersona = scene && m.speakerId ? (personaById.get(m.speakerId) ?? null) : null
                     const beatSpeaker = scene ? (m.speakerName ?? beatPersona?.name ?? 'Character') : speaker
                     return (
                       <div key={m.id} className="contents">

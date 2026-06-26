@@ -5,8 +5,16 @@ import type { ChatMessage, Conversation } from './types'
 
 export type ExportFormat = 'markdown' | 'json' | 'text'
 
-const roleLabel = (role: ChatMessage['role']): string =>
-  role === 'user' ? 'You' : role === 'assistant' ? 'Sibyl' : 'System'
+/**
+ * Who a message is attributed to in an export. Scene beats carry their own
+ * speaker; director notes are out-of-character; otherwise it's the writer ("You")
+ * or the assistant ("Sibyl").
+ */
+const speakerLabel = (m: ChatMessage): string => {
+  if (m.director) return 'Director'
+  if (m.role === 'assistant') return m.speakerName?.trim() || 'Sibyl'
+  return m.role === 'user' ? 'You' : 'System'
+}
 
 /** Turns rendered into the document — skip the empty assistant placeholder + system turns. */
 function exportableMessages(conv: Conversation): ChatMessage[] {
@@ -18,7 +26,7 @@ export function conversationToMarkdown(conv: Conversation): string {
   const summary = conv.compaction?.summary?.trim()
   if (summary) lines.push(`> **Earlier conversation summary:** ${summary}`, '')
   for (const m of exportableMessages(conv)) {
-    lines.push(`**${roleLabel(m.role)}:**`, '', m.content.trim(), '')
+    lines.push(`**${speakerLabel(m)}:**`, '', m.content.trim(), '')
   }
   return lines.join('\n').trimEnd() + '\n'
 }
@@ -28,7 +36,7 @@ export function conversationToText(conv: Conversation): string {
   const summary = conv.compaction?.summary?.trim()
   if (summary) lines.push(`[Earlier conversation summary] ${summary}`, '')
   for (const m of exportableMessages(conv)) {
-    lines.push(`${roleLabel(m.role)}:`, m.content.trim(), '')
+    lines.push(`${speakerLabel(m)}:`, m.content.trim(), '')
   }
   return lines.join('\n').trimEnd() + '\n'
 }
