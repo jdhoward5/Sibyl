@@ -56,6 +56,25 @@ function OverflowBanner() {
   )
 }
 
+/** Status strip shown above the composer while a compaction pass is running. */
+function CompactionStatus() {
+  const compacting = useStore((s) => s.compacting)
+  if (!compacting) return null
+  return (
+    <div className="shrink-0 px-4">
+      <div className="mx-auto flex max-w-3xl items-center gap-2.5 rounded-lg border border-sibyl-border bg-sibyl-surface px-3 py-2 text-[12px] text-sibyl-secondary">
+        <CompressIcon size={13} className="shrink-0 text-sibyl-accent" />
+        <span className="flex-1">Summarizing earlier messages to free up context…</span>
+        <span className="flex items-center gap-1" aria-hidden>
+          <span className="h-1.5 w-1.5 animate-pulse-glow rounded-full bg-sibyl-accent" />
+          <span className="h-1.5 w-1.5 animate-pulse-glow rounded-full bg-sibyl-accent [animation-delay:0.2s]" />
+          <span className="h-1.5 w-1.5 animate-pulse-glow rounded-full bg-sibyl-accent [animation-delay:0.4s]" />
+        </span>
+      </div>
+    </div>
+  )
+}
+
 /** Divider marking where older turns have been folded into a summary. */
 function CompactionDivider({ conversation }: { conversation: Conversation }) {
   const c = conversation.compaction
@@ -560,6 +579,7 @@ export function ChatView() {
               </div>
             )}
 
+            <CompactionStatus />
             <Composer />
           </>
         )}

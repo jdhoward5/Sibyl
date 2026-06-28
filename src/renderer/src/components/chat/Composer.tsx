@@ -11,6 +11,7 @@ export function Composer() {
   const [mode, setMode] = useState<Mode>('speak')
   const ref = useRef<HTMLTextAreaElement>(null)
   const generating = useStore((s) => s.engine.state === 'generating')
+  const compacting = useStore((s) => s.compacting)
   const hasModel = useStore((s) => Boolean(s.engine.modelId))
   const conv = useStore((s) => s.conversations.find((c) => c.id === s.activeConversationId))
   const scene = isScene(conv)
@@ -24,7 +25,7 @@ export function Composer() {
   }, [text])
 
   const submit = (): void => {
-    if (generating || !text.trim()) return
+    if (generating || compacting || !text.trim()) return
     if (scene) {
       if (mode === 'direct') void actions.sceneDirect(text)
       else void actions.sceneSpeak(text)
