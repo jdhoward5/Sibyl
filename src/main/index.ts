@@ -383,11 +383,9 @@ app.on('window-all-closed', () => {
 // native llama.cpp/CUDA backend out from under an exiting process otherwise
 // crashes on Windows. We intercept the first quit, clean up, then exit.
 //
-// The auto-updater's install path (updater.ts) runs the *same* `teardownGpu()`
-// before it spawns the NSIS installer, so by the time `quitAndInstall` triggers
-// this handler the teardown is already done and we exit at once — otherwise the
-// installer's "is Sibyl still running?" check trips while we're disposing and
-// reports "Sibyl cannot be closed".
+// The Squirrel updater's install path (updater.ts) runs the *same*
+// `teardownGpu()` before `quitAndInstall`, so this second pass is normally a
+// no-op. Keeping the global quit guard ensures every other exit path is safe too.
 let cleanedUp = false
 app.on('before-quit', (event) => {
   if (cleanedUp) return

@@ -37,6 +37,10 @@
     "onnxruntime-node": "^1.27.0",
     "phonemizer": "^1.2.1"
   },
+  "overrides": {
+    "adm-zip": "0.6.0",
+    "tar": "7.5.21"
+  },
   "devDependencies": {
     "@fontsource-variable/geist": "^5.2.9",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",

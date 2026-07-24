@@ -84,8 +84,8 @@ if ($DryRun) {
   return
 }
 
-# Tag this commit (idempotent) and publish a pre-release with the installer +
-# update metadata attached.
+# Tag this commit (idempotent) and publish the latest stable release with the
+# installer + update metadata attached.
 if (-not (git tag --list $tag)) {
   git tag -a $tag -m "Sibyl $tag"
 }
