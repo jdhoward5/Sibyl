@@ -53,6 +53,17 @@ export default defineConfig({
   },
   preload: {
     plugins: [externalizeDepsPlugin()],
+    build: {
+      rollupOptions: {
+        // Electron's sandboxed preload loader accepts CommonJS, not an ESM
+        // preload. Keep the renderer sandbox enabled and emit an explicit .cjs
+        // artifact even though the package itself uses `"type": "module"`.
+        output: {
+          format: 'cjs',
+          entryFileNames: '[name].cjs'
+        }
+      }
+    },
     resolve: {
       alias: {
         '@shared': resolve('src/shared')

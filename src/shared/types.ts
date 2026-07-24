@@ -356,6 +356,19 @@ export interface AppSettings {
   telemetry: false // Sibyl never sends telemetry.
 }
 
+/**
+ * Settings safe to expose to the renderer. The decrypted Hugging Face token is
+ * deliberately replaced by a presence bit; only main may hold the secret.
+ */
+export type RendererSettings = Omit<AppSettings, 'hfToken'> & {
+  hfTokenConfigured: boolean
+}
+
+/** Renderer-writable settings. Secrets and main-owned paths are not writable here. */
+export type RendererSettingsPatch = Partial<
+  Omit<RendererSettings, 'hfTokenConfigured' | 'modelsDir'>
+>
+
 export interface EngineStatus {
   state: 'idle' | 'loading' | 'ready' | 'generating' | 'error'
   modelId: string | null

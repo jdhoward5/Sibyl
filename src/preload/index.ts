@@ -1,13 +1,19 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '@shared/ipc'
 import type { SibylBridge, ChatSendRequest, ChatAdvanceRequest, TtsSpeakRequest } from '@shared/ipc'
-import type { AppSettings, Conversation } from '@shared/types'
+import type { Conversation, RendererSettingsPatch } from '@shared/types'
 
 /**
  * The single bridge exposed to the renderer. Every method funnels through
  * ipcRenderer.invoke (request/response) or a guarded event subscription.
  * The renderer never receives the raw IpcRendererEvent, only typed payloads.
  */
+
+// A dropped file must never become a top-frame navigation. Main independently
+// rejects the resulting URL as a defense in depth; preventing the default here
+// also avoids a disruptive failed-navigation flash.
+window.addEventListener('dragover', (event) => event.preventDefault())
+window.addEventListener('drop', (event) => event.preventDefault())
 
 function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
   const listener = (_event: Electron.IpcRendererEvent, payload: T): void => cb(payload)
@@ -59,7 +65,9 @@ const bridge: SibylBridge = {
   },
   settings: {
     get: () => ipcRenderer.invoke(IPC.settingsGet),
-    set: (patch: Partial<AppSettings>) => ipcRenderer.invoke(IPC.settingsSet, patch)
+    set: (patch: RendererSettingsPatch) => ipcRenderer.invoke(IPC.settingsSet, patch),
+    setHfToken: (token) => ipcRenderer.invoke(IPC.settingsSetHfToken, token),
+    clearHfToken: () => ipcRenderer.invoke(IPC.settingsClearHfToken)
   },
   app: {
     info: () => ipcRenderer.invoke(IPC.appInfo)

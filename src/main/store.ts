@@ -4,7 +4,14 @@ import { existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { parseParamLabel, parseQuant } from '@shared/format'
-import type { AppSettings, Conversation, InstalledModel, Persona, SystemPromptPreset } from '@shared/types'
+import type {
+  AppSettings,
+  Conversation,
+  InstalledModel,
+  Persona,
+  RendererSettings,
+  SystemPromptPreset
+} from '@shared/types'
 import {
   DEFAULT_CONTEXT_SETTINGS,
   DEFAULT_GENERATION_OPTIONS,
@@ -13,6 +20,7 @@ import {
 import { DEFAULT_TTS_SETTINGS, type InstalledVoice } from '@shared/tts'
 import { DEFAULT_ACCENT } from '@shared/themes'
 import { DEFAULT_PERSONAS, gradientFor, initialsOf } from '@shared/personas'
+import { parseCanonicalId, parseConversation } from '@shared/validation'
 
 /** Deep-ish clone so callers can't mutate the shared default persona objects. */
 function clonePersona(p: Persona): Persona {
@@ -241,6 +249,12 @@ export async function setSettings(patch: Partial<AppSettings>): Promise<AppSetti
   return next
 }
 
+/** Strip the decrypted secret before settings cross into renderer memory. */
+export function settingsForRenderer(settings: AppSettings): RendererSettings {
+  const { hfToken, ...visible } = settings
+  return { ...visible, hfTokenConfigured: hfToken !== null }
+}
+
 export async function getModelsDir(): Promise<string> {
   const s = await getSettings()
   await ensureDir(s.modelsDir)
@@ -365,26 +379,9 @@ export async function removeInstalledVoice(id: string): Promise<InstalledVoice |
 // ---------------------------------------------------------------------------
 
 function convFile(id: string): string {
-  // Guard against path traversal from a crafted id.
-  const safe = id.replace(/[^a-zA-Z0-9_-]/g, '')
-  return path.join(conversationsDir(), `${safe}.json`)
-}
-
-/** Structural check that a parsed object is a usable Conversation the engine can run. */
-function isValidConversation(v: unknown): v is Conversation {
-  if (!v || typeof v !== 'object') return false
-  const c = v as Record<string, unknown>
-  if (typeof c.id !== 'string' || typeof c.title !== 'string') return false
-  if (!Array.isArray(c.messages)) return false
-  return c.messages.every((m) => {
-    if (!m || typeof m !== 'object') return false
-    const mm = m as Record<string, unknown>
-    return (
-      typeof mm.id === 'string' &&
-      (mm.role === 'user' || mm.role === 'assistant' || mm.role === 'system') &&
-      typeof mm.content === 'string'
-    )
-  })
+  // Reject malformed ids instead of sanitizing distinct inputs into the same
+  // filesystem path.
+  return path.join(conversationsDir(), `${parseCanonicalId(id, 'conversationId')}.json`)
 }
 
 /** Move a corrupt conversation file aside so it stops breaking loads but isn't lost. */
@@ -411,11 +408,12 @@ async function loadConversation(filePath: string): Promise<Conversation | null> 
     await quarantineFile(filePath)
     return null
   }
-  if (!isValidConversation(parsed)) {
+  try {
+    return parseConversation(parsed)
+  } catch {
     await quarantineFile(filePath)
     return null
   }
-  return parsed
 }
 
 export async function listConversations(): Promise<Conversation[]> {

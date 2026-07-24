@@ -10,14 +10,13 @@ import {
 } from '@shared/ipc'
 import { buildExport, exportFileBaseName, type ExportFormat } from '@shared/export'
 import type {
-  AppSettings,
   ContextUsage,
   Conversation,
   EngineStatus,
   GenerationEvent,
   Result
 } from '@shared/types'
-import { getModelDetail, searchModels, type SortKey } from './hf'
+import { getModelDetail, repoContainsGgufFile, searchModels } from './hf'
 import { downloadManager } from './downloads'
 import { engine } from './engine'
 import { tts } from './tts'
@@ -35,8 +34,33 @@ import {
   listInstalledVoices,
   removeInstalledModel,
   saveConversation,
-  setSettings
+  setSettings,
+  settingsForRenderer
 } from './store'
+import {
+  assertChatAdvanceState,
+  assertChatSendState,
+  parseArgs,
+  parseCanonicalId,
+  parseChatAdvanceRequest,
+  parseChatSendRequest,
+  parseConversation,
+  parseExportFormat,
+  parseHfToken,
+  parseModelId,
+  parseNoArgs,
+  parseRendererSettingsPatch,
+  parseRepoFilename,
+  parseRepoId,
+  parseSearchQuery,
+  parseSortKey,
+  parseTtsSpeakRequest
+} from '@shared/validation'
+import {
+  isAllowedRendererUrl,
+  isTrustedRendererFrame,
+  type RendererUrlPolicy
+} from '@shared/security'
 
 function ok<T>(data: T): Result<T> {
   return { ok: true, data }
@@ -46,10 +70,33 @@ function fail<T>(error: unknown): Result<T> {
   return { ok: false, error: error instanceof Error ? error.message : String(error) }
 }
 
-/** Wrap an async handler so it always resolves to a Result and never throws across IPC. */
-function handle<T>(channel: string, fn: (event: IpcMainInvokeEvent, ...args: any[]) => Promise<T>): void {
-  ipcMain.handle(channel, async (event, ...args) => {
+function trustedSender(event: IpcMainInvokeEvent, policy: RendererUrlPolicy): boolean {
+  const frame = event.senderFrame
+  if (!frame) return false
+  return isTrustedRendererFrame(
+    {
+      senderDestroyed: event.sender.isDestroyed(),
+      isMainFrame: frame === event.sender.mainFrame,
+      isTopFrame: frame.top === frame,
+      url: frame.url
+    },
+    policy
+  )
+}
+
+/** Authenticate, validate, and wrap every handler in a structured Result. */
+function handle<TArgs extends unknown[], T>(
+  channel: string,
+  policy: RendererUrlPolicy,
+  parse: (args: unknown[]) => TArgs,
+  fn: (event: IpcMainInvokeEvent, ...args: TArgs) => Promise<T>
+): void {
+  ipcMain.handle(channel, async (event, ...rawArgs) => {
     try {
+      if (!trustedSender(event, policy)) {
+        return fail<T>('IPC request rejected: untrusted renderer frame or URL.')
+      }
+      const args = parse(rawArgs)
       return ok(await fn(event, ...args))
     } catch (err) {
       return fail<T>(err)
@@ -57,35 +104,65 @@ function handle<T>(channel: string, fn: (event: IpcMainInvokeEvent, ...args: any
   })
 }
 
-function broadcast(channel: string, payload: unknown): void {
+function broadcast(channel: string, payload: unknown, policy: RendererUrlPolicy): void {
   for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.isDestroyed()) win.webContents.send(channel, payload)
+    if (
+      !win.isDestroyed() &&
+      isAllowedRendererUrl(win.webContents.mainFrame.url, policy)
+    ) {
+      win.webContents.send(channel, payload)
+    }
   }
 }
 
-export function registerIpc(): void {
+export function registerIpc(policy: RendererUrlPolicy): void {
   // --- Hugging Face -------------------------------------------------------
-  handle(IPC.hfSearch, async (_e, query: string, sort?: SortKey) =>
-    searchModels(String(query ?? ''), (sort as SortKey) ?? 'trending')
+  handle(
+    IPC.hfSearch,
+    policy,
+    (args) => parseArgs<[string, 'trending' | 'downloads' | 'likes' | undefined]>(
+      args,
+      parseSearchQuery,
+      parseSortKey
+    ),
+    async (_e, query, sort) => searchModels(query, sort ?? 'trending')
   )
-  handle(IPC.hfModelDetail, async (_e, repoId: string) => getModelDetail(String(repoId)))
+  handle(
+    IPC.hfModelDetail,
+    policy,
+    (args) => parseArgs<[string]>(args, (v) => parseRepoId(v)),
+    async (_e, repoId) => getModelDetail(repoId)
+  )
 
   // --- Downloads ----------------------------------------------------------
-  handle(IPC.downloadStart, async (_e, repoId: string, filename: string) =>
-    downloadManager.start(String(repoId), String(filename))
+  handle(
+    IPC.downloadStart,
+    policy,
+    (args) => parseArgs<[string, string]>(args, (v) => parseRepoId(v), (v) => parseRepoFilename(v)),
+    async (_e, repoId, filename) => {
+      if (!(await repoContainsGgufFile(repoId, filename))) {
+        throw new Error('The requested GGUF file is not present in the selected repository.')
+      }
+      return downloadManager.start(repoId, filename)
+    }
   )
-  handle(IPC.downloadCancel, async (_e, id: string) => {
-    downloadManager.cancel(String(id))
-  })
-  handle(IPC.downloadList, async () => downloadManager.list())
+  handle(
+    IPC.downloadCancel,
+    policy,
+    (args) => parseArgs<[string]>(args, (v) => parseModelId(v, 'downloadId')),
+    async (_e, id) => {
+      downloadManager.cancel(id)
+    }
+  )
+  handle(IPC.downloadList, policy, parseNoArgs, async () => downloadManager.list())
 
   // --- Installed models ---------------------------------------------------
-  handle(IPC.modelsList, async () => listInstalledModels())
-  handle(IPC.modelsDelete, async (_e, id: string) => {
+  handle(IPC.modelsList, policy, parseNoArgs, async () => listInstalledModels())
+  handle(IPC.modelsDelete, policy, (args) => parseArgs<[string]>(args, (v) => parseModelId(v)), async (_e, id) => {
     if (engine && (await engine.status()).modelId === id) {
       await engine.unload()
     }
-    const removed = await removeInstalledModel(String(id))
+    const removed = await removeInstalledModel(id)
     // Only delete files Sibyl fetched. A locally-imported model points at the
     // user's own file, registered in place — deregister it but never unlink it.
     if (removed && !removed.local) {
@@ -96,11 +173,11 @@ export function registerIpc(): void {
       }
     }
   })
-  handle(IPC.modelsReveal, async (_e, id: string) => {
-    const model = await getInstalledModel(String(id))
+  handle(IPC.modelsReveal, policy, (args) => parseArgs<[string]>(args, (v) => parseModelId(v)), async (_e, id) => {
+    const model = await getInstalledModel(id)
     if (model) shell.showItemInFolder(model.path)
   })
-  handle(IPC.modelsImport, async () => {
+  handle(IPC.modelsImport, policy, parseNoArgs, async () => {
     const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
     const opts = {
       title: 'Select a GGUF model file',
@@ -115,62 +192,73 @@ export function registerIpc(): void {
   })
 
   // --- Engine -------------------------------------------------------------
-  handle(IPC.engineLoad, async (_e, modelId: string) => engine.load(String(modelId)))
-  handle(IPC.engineUnload, async () => {
+  handle(IPC.engineLoad, policy, (args) => parseArgs<[string]>(args, (v) => parseModelId(v)), async (_e, modelId) => engine.load(modelId))
+  handle(IPC.engineUnload, policy, parseNoArgs, async () => {
     await engine.unload()
   })
-  handle(IPC.engineStatus, async () => engine.status())
+  handle(IPC.engineStatus, policy, parseNoArgs, async () => engine.status())
 
   // --- Chat ---------------------------------------------------------------
-  handle(IPC.chatSend, async (_e, req: ChatSendRequest) => {
+  handle(IPC.chatSend, policy, (args) => parseArgs<[ChatSendRequest]>(args, parseChatSendRequest), async (_e, req) => {
     const conversation = await getConversation(req.conversationId)
     if (!conversation) throw new Error(`Conversation not found: ${req.conversationId}`)
+    assertChatSendState(conversation, req)
     // Fire generation; streaming events flow over IPC.chatEvent.
     void engine.generate(conversation, req.message, req.assistantMessageId, req.options)
   })
-  handle(IPC.chatAdvance, async (_e, req: ChatAdvanceRequest) => {
+  handle(IPC.chatAdvance, policy, (args) => parseArgs<[ChatAdvanceRequest]>(args, parseChatAdvanceRequest), async (_e, req) => {
     const conversation = await getConversation(req.conversationId)
     if (!conversation) throw new Error(`Conversation not found: ${req.conversationId}`)
+    assertChatAdvanceState(conversation, req)
     // Generate one scene beat; streaming events flow over the same IPC.chatEvent.
     void engine.generateBeat(conversation, req.speakerId, req.assistantMessageId, req.options)
   })
-  handle(IPC.chatAbort, async () => {
+  handle(IPC.chatAbort, policy, (args) => parseArgs<[string]>(args, (v) => parseCanonicalId(v, 'conversationId')), async (_e, _conversationId) => {
     engine.abortGeneration()
   })
-  handle(IPC.chatCompact, async (_e, conversationId: string) => {
-    const conversation = await getConversation(String(conversationId))
+  handle(IPC.chatCompact, policy, (args) => parseArgs<[string]>(args, (v) => parseCanonicalId(v, 'conversationId')), async (_e, conversationId) => {
+    const conversation = await getConversation(conversationId)
     if (!conversation) throw new Error(`Conversation not found: ${conversationId}`)
     return engine.compact(conversation)
   })
-  handle(IPC.chatInvalidate, async (_e, conversationId: string) => {
-    engine.invalidateSession(String(conversationId))
+  handle(IPC.chatInvalidate, policy, (args) => parseArgs<[string]>(args, (v) => parseCanonicalId(v, 'conversationId')), async (_e, conversationId) => {
+    engine.invalidateSession(conversationId)
   })
 
   // --- Context window -----------------------------------------------------
-  handle(IPC.contextUsage, async (_e, conversationId: string | null) => {
-    const conversation = conversationId ? await getConversation(String(conversationId)) : null
+  handle(
+    IPC.contextUsage,
+    policy,
+    (args) =>
+      parseArgs<[string | null]>(args, (v) =>
+        v === null ? null : parseCanonicalId(v, 'conversationId')
+      ),
+    async (_e, conversationId) => {
+    const conversation = conversationId ? await getConversation(conversationId) : null
     return engine.computeUsage(conversation)
   })
 
   // --- Conversations ------------------------------------------------------
-  handle(IPC.convList, async () => listConversations())
-  handle(IPC.convGet, async (_e, id: string) => {
-    const conv = await getConversation(String(id))
+  handle(IPC.convList, policy, parseNoArgs, async () => listConversations())
+  handle(IPC.convGet, policy, (args) => parseArgs<[string]>(args, (v) => parseCanonicalId(v)), async (_e, id) => {
+    const conv = await getConversation(id)
     if (!conv) throw new Error(`Conversation not found: ${id}`)
     return conv
   })
-  handle(IPC.convSave, async (_e, conversation: Conversation) => {
+  handle(IPC.convSave, policy, (args) => parseArgs<[Conversation]>(args, parseConversation), async (_e, conversation) => {
     await saveConversation(conversation)
   })
-  handle(IPC.convDelete, async (_e, id: string) => {
-    await deleteConversation(String(id))
+  handle(IPC.convDelete, policy, (args) => parseArgs<[string]>(args, (v) => parseCanonicalId(v)), async (_e, id) => {
+    await deleteConversation(id)
   })
-  handle(IPC.convExport, async (_e, id: string, format: ExportFormat) => {
-    const conversation = await getConversation(String(id))
+  handle(IPC.convExport, policy, (args) => parseArgs<[string, ExportFormat]>(
+    args,
+    (v) => parseCanonicalId(v),
+    parseExportFormat
+  ), async (_e, id, format) => {
+    const conversation = await getConversation(id)
     if (!conversation) throw new Error(`Conversation not found: ${id}`)
-    const fmt: ExportFormat =
-      format === 'json' || format === 'text' ? format : 'markdown'
-    const { content, ext } = buildExport(conversation, fmt)
+    const { content, ext } = buildExport(conversation, format)
     const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? null
     const options: Electron.SaveDialogOptions = {
       defaultPath: `${exportFileBaseName(conversation)}.${ext}`,
@@ -185,11 +273,27 @@ export function registerIpc(): void {
   })
 
   // --- Settings -----------------------------------------------------------
-  handle(IPC.settingsGet, async () => getSettings())
-  handle(IPC.settingsSet, async (_e, patch: Partial<AppSettings>) => setSettings(patch))
+  handle(IPC.settingsGet, policy, parseNoArgs, async () => settingsForRenderer(await getSettings()))
+  handle(
+    IPC.settingsSet,
+    policy,
+    (args) => parseArgs(args, parseRendererSettingsPatch),
+    async (_e, patch) => settingsForRenderer(await setSettings(patch))
+  )
+  handle(
+    IPC.settingsSetHfToken,
+    policy,
+    (args) => parseArgs<[string]>(args, parseHfToken),
+    async (_e, token) => {
+      await setSettings({ hfToken: token })
+    }
+  )
+  handle(IPC.settingsClearHfToken, policy, parseNoArgs, async () => {
+    await setSettings({ hfToken: null })
+  })
 
   // --- App info -----------------------------------------------------------
-  handle(IPC.appInfo, async (): Promise<AppInfo> => {
+  handle(IPC.appInfo, policy, parseNoArgs, async (): Promise<AppInfo> => {
     const settings = await getSettings()
     return {
       version: app.getVersion(),
@@ -202,41 +306,41 @@ export function registerIpc(): void {
   })
 
   // --- Text-to-speech -----------------------------------------------------
-  handle(IPC.ttsStatus, async () => tts.status())
-  handle(IPC.ttsVoicesList, async () => listInstalledVoices())
-  handle(IPC.ttsVoiceDownloads, async () => tts.listVoiceDownloads())
-  handle(IPC.ttsVoiceDownload, async (_e, voiceId: string) => {
+  handle(IPC.ttsStatus, policy, parseNoArgs, async () => tts.status())
+  handle(IPC.ttsVoicesList, policy, parseNoArgs, async () => listInstalledVoices())
+  handle(IPC.ttsVoiceDownloads, policy, parseNoArgs, async () => tts.listVoiceDownloads())
+  handle(IPC.ttsVoiceDownload, policy, (args) => parseArgs<[string]>(args, (v) => parseCanonicalId(v, 'voiceId')), async (_e, voiceId) => {
     // Fire-and-forget; progress flows over IPC.ttsVoiceProgress.
-    void tts.downloadVoice(String(voiceId))
+    void tts.downloadVoice(voiceId)
   })
-  handle(IPC.ttsVoiceCancel, async (_e, voiceId: string) => {
-    tts.cancelVoiceDownload(String(voiceId))
+  handle(IPC.ttsVoiceCancel, policy, (args) => parseArgs<[string]>(args, (v) => parseCanonicalId(v, 'voiceId')), async (_e, voiceId) => {
+    tts.cancelVoiceDownload(voiceId)
   })
-  handle(IPC.ttsVoiceDelete, async (_e, voiceId: string) => {
-    await tts.deleteVoice(String(voiceId))
+  handle(IPC.ttsVoiceDelete, policy, (args) => parseArgs<[string]>(args, (v) => parseCanonicalId(v, 'voiceId')), async (_e, voiceId) => {
+    await tts.deleteVoice(voiceId)
   })
-  handle(IPC.ttsSpeak, async (_e, req: TtsSpeakRequest) => {
+  handle(IPC.ttsSpeak, policy, (args) => parseArgs<[TtsSpeakRequest]>(args, parseTtsSpeakRequest), async (_e, req) => {
     // Privacy: req.text is message content — synthesized locally, never logged.
     void tts.speak(req.messageId, req.text, { voiceId: req.voiceId, rate: req.rate })
   })
-  handle(IPC.ttsStop, async () => {
+  handle(IPC.ttsStop, policy, parseNoArgs, async () => {
     tts.stop()
   })
 
   // --- Auto-update --------------------------------------------------------
-  handle(IPC.updateCheck, async () => updater.check())
-  handle(IPC.updateInstall, async () => {
+  handle(IPC.updateCheck, policy, parseNoArgs, async () => updater.check())
+  handle(IPC.updateInstall, policy, parseNoArgs, async () => {
     await updater.install()
   })
-  handle(IPC.updateStatus, async () => updater.getStatus())
+  handle(IPC.updateStatus, policy, parseNoArgs, async () => updater.getStatus())
 
   // --- Event forwarding main → renderer -----------------------------------
-  downloadManager.on('progress', (p) => broadcast(IPC.downloadProgress, p))
-  engine.on('event', (e: GenerationEvent) => broadcast(IPC.chatEvent, e))
-  engine.on('status', (s: EngineStatus) => broadcast(IPC.engineStatusEvent, s))
-  engine.on('context', (u: ContextUsage) => broadcast(IPC.contextEvent, u))
-  tts.on('event', (e: TtsEvent) => broadcast(IPC.ttsEvent, e))
-  tts.on('status', (s: TtsStatus) => broadcast(IPC.ttsStatusEvent, s))
-  tts.on('voiceProgress', (p: TtsVoiceDownload) => broadcast(IPC.ttsVoiceProgress, p))
-  updater.on('status', (s) => broadcast(IPC.updateEvent, s))
+  downloadManager.on('progress', (p) => broadcast(IPC.downloadProgress, p, policy))
+  engine.on('event', (e: GenerationEvent) => broadcast(IPC.chatEvent, e, policy))
+  engine.on('status', (s: EngineStatus) => broadcast(IPC.engineStatusEvent, s, policy))
+  engine.on('context', (u: ContextUsage) => broadcast(IPC.contextEvent, u, policy))
+  tts.on('event', (e: TtsEvent) => broadcast(IPC.ttsEvent, e, policy))
+  tts.on('status', (s: TtsStatus) => broadcast(IPC.ttsStatusEvent, s, policy))
+  tts.on('voiceProgress', (p: TtsVoiceDownload) => broadcast(IPC.ttsVoiceProgress, p, policy))
+  updater.on('status', (s) => broadcast(IPC.updateEvent, s, policy))
 }

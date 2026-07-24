@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { actions, uid, useStore } from '../../store'
-import type { AppSettings, GenerationProfile } from '@shared/types'
+import type { GenerationProfile, RendererSettings, RendererSettingsPatch } from '@shared/types'
 import { ACCENT_THEMES } from '@shared/themes'
 import { TTS_VOICE_CATALOG } from '@shared/tts'
 import { formatBytes } from '@shared/format'
@@ -19,7 +19,7 @@ import {
 } from '../../lib/icons'
 
 /** Manage the persona library — the reusable characters you write with. */
-function PersonasSection({ settings }: { settings: AppSettings }) {
+function PersonasSection({ settings }: { settings: RendererSettings }) {
   const personas = settings.personas
   const [editor, setEditor] = useState<{ id: string | null } | null>(null)
   return (
@@ -55,7 +55,7 @@ function PersonasSection({ settings }: { settings: AppSettings }) {
 }
 
 /** Manage reusable generation-parameter profiles; apply one to the global params. */
-function GenerationProfilesSection({ settings }: { settings: AppSettings }) {
+function GenerationProfilesSection({ settings }: { settings: RendererSettings }) {
   const profiles = settings.generationProfiles
   const [name, setName] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -155,7 +155,7 @@ function GenerationProfilesSection({ settings }: { settings: AppSettings }) {
 }
 
 /** Manage on-device speech: voices to download, selection, and playback controls. */
-function VoiceSpeechSection({ settings }: { settings: AppSettings }) {
+function VoiceSpeechSection({ settings }: { settings: RendererSettings }) {
   const tts = settings.tts
   const status = useStore((s) => s.tts)
   const installed = useStore((s) => s.installedVoices)
@@ -399,7 +399,7 @@ export function SettingsView() {
 
   if (!settings) return null
 
-  const update = (patch: Partial<AppSettings>): void => void actions.updateSettings(patch)
+  const update = (patch: RendererSettingsPatch): void => void actions.updateSettings(patch)
   const gen = settings.generation
   const load = settings.load
   const ctx = settings.context
@@ -407,7 +407,7 @@ export function SettingsView() {
   // Offer only the backends that exist on the current OS: Metal on macOS,
   // CUDA/Vulkan on Windows. 'Auto' and 'CPU' are always valid.
   const isMac = appInfo?.platform === 'darwin'
-  const gpuOptions: { value: AppSettings['gpu']; label: string }[] = isMac
+  const gpuOptions: { value: RendererSettings['gpu']; label: string }[] = isMac
     ? [
         { value: 'auto', label: 'Auto' },
         { value: 'metal', label: 'Metal' },
@@ -580,7 +580,16 @@ export function SettingsView() {
             <div className="flex gap-2">
               <input
                 type="password"
-                value={tokenDirty ? token : settings.hfToken ? '••••••••••••••••' : ''}
+                value={tokenDirty ? token : settings.hfTokenConfigured ? '••••••••••••••••' : ''}
+                onFocus={() => {
+                  if (!tokenDirty && settings.hfTokenConfigured) {
+                    setToken('')
+                    setTokenDirty(true)
+                  }
+                }}
+                onBlur={() => {
+                  if (tokenDirty && !token) setTokenDirty(false)
+                }}
                 onChange={(e) => {
                   setToken(e.target.value)
                   setTokenDirty(true)
@@ -590,21 +599,27 @@ export function SettingsView() {
               />
               <button
                 onClick={() => {
-                  update({ hfToken: token.trim() || null })
-                  setTokenDirty(false)
-                  setToken('')
+                  const next = token.trim()
+                  if (!next) return
+                  void actions.setHfToken(next).then((saved) => {
+                    if (!saved) return
+                    setTokenDirty(false)
+                    setToken('')
+                  })
                 }}
                 disabled={!tokenDirty}
                 className="btn-primary"
               >
                 Save
               </button>
-              {settings.hfToken && (
+              {settings.hfTokenConfigured && (
                 <button
                   onClick={() => {
-                    update({ hfToken: null })
-                    setTokenDirty(false)
-                    setToken('')
+                    void actions.clearHfToken().then((cleared) => {
+                      if (!cleared) return
+                      setTokenDirty(false)
+                      setToken('')
+                    })
                   }}
                   className="btn-ghost"
                 >

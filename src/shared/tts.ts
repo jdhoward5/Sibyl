@@ -26,8 +26,33 @@ export interface TtsVoice {
   configPath: string
   /** Approximate download size of the model in bytes (config is negligible). */
   sizeBytes: number
+  /** Reviewed SHA-256 of the immutable model asset. */
+  modelSha256: string
+  /** Exact byte size and reviewed SHA-256 of the JSON config asset. */
+  configSizeBytes: number
+  configSha256: string
   /** One-line flavour note for the picker. */
   note?: string
+}
+
+/** Pure final integrity decision used by the streaming downloader and tests. */
+export function voiceAssetIntegrityError(
+  expectedBytes: number,
+  expectedSha256: string,
+  maxBytes: number,
+  actualBytes: number,
+  actualSha256: string
+): string | null {
+  if (expectedBytes > maxBytes || actualBytes > maxBytes) {
+    return 'Voice asset exceeds the configured safety ceiling.'
+  }
+  if (actualBytes !== expectedBytes) {
+    return 'Voice asset was truncated or had an unexpected size.'
+  }
+  if (actualSha256 !== expectedSha256) {
+    return 'Voice asset failed SHA-256 verification.'
+  }
+  return null
 }
 
 /** A voice whose model files are downloaded and registered on disk. */
@@ -175,9 +200,12 @@ export function phonemesToIds(
 // Catalog
 // ---------------------------------------------------------------------------
 
+/** Reviewed immutable piper-voices revision used by every catalog URL. */
+export const PIPER_VOICES_REVISION = '0d907f158acc877ddeebcbf827659ee13bea8bcd'
+
 /** Base URL for resolving piper-voices files (raw download). */
 export const PIPER_VOICES_BASE_URL =
-  'https://huggingface.co/rhasspy/piper-voices/resolve/main/'
+  `https://huggingface.co/rhasspy/piper-voices/resolve/${PIPER_VOICES_REVISION}/`
 
 /** Absolute HF download URL for a catalog voice's `.onnx` model. */
 export function voiceModelUrl(voice: Pick<TtsVoice, 'modelPath'>): string {
@@ -189,18 +217,6 @@ export function voiceConfigUrl(voice: Pick<TtsVoice, 'configPath'>): string {
   return PIPER_VOICES_BASE_URL + voice.configPath
 }
 
-// Approximate model sizes by quality (the real Content-Length is used during the
-// download; these only drive the pre-download size hint in the picker).
-const SIZE_LOW = 28 * 1024 * 1024
-const SIZE_MEDIUM = 63 * 1024 * 1024
-const SIZE_HIGH = 114 * 1024 * 1024
-
-const SIZE_BY_QUALITY: Record<TtsVoiceQuality, number> = {
-  low: SIZE_LOW,
-  medium: SIZE_MEDIUM,
-  high: SIZE_HIGH
-}
-
 /** Build a catalog entry from the compact descriptor below. */
 function voice(
   id: string,
@@ -209,6 +225,10 @@ function voice(
   quality: TtsVoiceQuality,
   gender: 'female' | 'male' | undefined,
   modelPath: string,
+  sizeBytes: number,
+  modelSha256: string,
+  configSizeBytes: number,
+  configSha256: string,
   note?: string
 ): TtsVoice {
   return {
@@ -219,7 +239,10 @@ function voice(
     gender,
     modelPath,
     configPath: `${modelPath}.json`,
-    sizeBytes: SIZE_BY_QUALITY[quality],
+    sizeBytes,
+    modelSha256,
+    configSizeBytes,
+    configSha256,
     note
   }
 }
@@ -237,6 +260,10 @@ export const TTS_VOICE_CATALOG: TtsVoice[] = [
     'medium',
     'female',
     'en/en_US/amy/medium/en_US-amy-medium.onnx',
+    63201294,
+    'b3a6e47b57b8c7fbe6a0ce2518161a50f59a9cdd8a50835c02cb02bdd6206c18',
+    4882,
+    '95a23eb4d42909d38df73bb9ac7f45f597dbfcde2d1bf9526fdeaf5466977d77',
     'Warm, natural American female voice.'
   ),
   voice(
@@ -246,6 +273,10 @@ export const TTS_VOICE_CATALOG: TtsVoice[] = [
     'medium',
     'female',
     'en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx',
+    63201294,
+    '914c473788fc1fa8b63ace1cdcdb44588f4ae523d3ab37df1536616835a140b7',
+    5033,
+    '03f1fa0622b80463283592d97aca9f6e89aec345a5c56b7257723e0093c58b6c',
     'Clear, neutral American female voice.'
   ),
   voice(
@@ -255,6 +286,10 @@ export const TTS_VOICE_CATALOG: TtsVoice[] = [
     'medium',
     'male',
     'en/en_US/ryan/medium/en_US-ryan-medium.onnx',
+    63201294,
+    'abf4c274862564ed647ba0d2c47f8ee7c9b717d27bdad9219100eb310db4047a',
+    4883,
+    '44034c056cb15681b2ad494307c7f3f2e4499d1253c700c711fa0a4607ffe78d',
     'Confident American male voice.'
   ),
   voice(
@@ -264,6 +299,10 @@ export const TTS_VOICE_CATALOG: TtsVoice[] = [
     'medium',
     'female',
     'en/en_US/lessac/medium/en_US-lessac-medium.onnx',
+    63201294,
+    '5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f',
+    4885,
+    'efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0',
     'Crisp studio-quality reference voice.'
   ),
   voice(
@@ -273,6 +312,10 @@ export const TTS_VOICE_CATALOG: TtsVoice[] = [
     'medium',
     'female',
     'en/en_GB/alba/medium/en_GB-alba-medium.onnx',
+    63201294,
+    '401369c4a81d09fdd86c32c5c864440811dbdcc66466cde2d64f7133a66ad03b',
+    4888,
+    'aa965a2f02ecced632c2694e1fc72bbff6d65f265fab567ca945918c73dd89f4',
     'Scottish-accented British female voice.'
   ),
   voice(
@@ -282,6 +325,10 @@ export const TTS_VOICE_CATALOG: TtsVoice[] = [
     'medium',
     'male',
     'en/en_GB/northern_english_male/medium/en_GB-northern_english_male-medium.onnx',
+    63201294,
+    '57a219ae8e638873db7d18893304be5069c42868f392bb95c3ff17f0690d0689',
+    4847,
+    '69557ed3d974463453e9b0c09dd99a7ed0e52b8b87b64b357dbeeb2540a97d47',
     'Northern English male voice.'
   ),
   voice(
@@ -291,6 +338,10 @@ export const TTS_VOICE_CATALOG: TtsVoice[] = [
     'low',
     'female',
     'en/en_US/amy/low/en_US-amy-low.onnx',
+    63104526,
+    'a5a91abb7de0f104358a25aded480ddacf1ff0762886325886ec406a2e86aab3',
+    4164,
+    '2250a9a605b8dc35a116717fadc5056695dd809e34a15d02f72a0f52d53d3ebb',
     'Smaller, faster build of Amy.'
   )
 ]

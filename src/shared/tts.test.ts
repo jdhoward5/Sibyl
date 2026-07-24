@@ -1,12 +1,14 @@
 import { describe, it, expect } from 'vitest'
 import {
+  PIPER_VOICES_REVISION,
+  TTS_VOICE_CATALOG,
   splitPhonemes,
   phonemesToIds,
   voiceModelUrl,
   voiceConfigUrl,
   findCatalogVoice,
   plainTextForSpeech,
-  TTS_VOICE_CATALOG,
+  voiceAssetIntegrityError,
   PIPER_VOICES_BASE_URL
 } from './tts'
 
@@ -46,6 +48,12 @@ describe('phonemesToIds', () => {
 })
 
 describe('catalog', () => {
+  it('pins every asset URL to a full immutable revision', () => {
+    expect(PIPER_VOICES_REVISION).toMatch(/^[a-f0-9]{40}$/)
+    expect(PIPER_VOICES_BASE_URL).toContain(`/resolve/${PIPER_VOICES_REVISION}/`)
+    expect(PIPER_VOICES_BASE_URL).not.toContain('/resolve/main/')
+  })
+
   it('builds resolve URLs under the piper-voices repo', () => {
     const v = TTS_VOICE_CATALOG[0]
     expect(voiceModelUrl(v)).toBe(PIPER_VOICES_BASE_URL + v.modelPath)
@@ -60,16 +68,35 @@ describe('catalog', () => {
     }
   })
 
-  it('has unique ids and positive size hints', () => {
+  it('has unique ids and exact integrity metadata', () => {
     const ids = new Set(TTS_VOICE_CATALOG.map((v) => v.id))
     expect(ids.size).toBe(TTS_VOICE_CATALOG.length)
-    for (const v of TTS_VOICE_CATALOG) expect(v.sizeBytes).toBeGreaterThan(0)
+    for (const v of TTS_VOICE_CATALOG) {
+      expect(v.sizeBytes).toBeGreaterThan(0)
+      expect(v.configSizeBytes).toBeGreaterThan(0)
+      expect(v.modelSha256).toMatch(/^[a-f0-9]{64}$/)
+      expect(v.configSha256).toMatch(/^[a-f0-9]{64}$/)
+    }
   })
 
   it('finds a voice by id and ignores unknown/empty ids', () => {
     expect(findCatalogVoice('en_US-amy-medium')?.name).toBe('Amy')
     expect(findCatalogVoice('nope')).toBeUndefined()
     expect(findCatalogVoice(null)).toBeUndefined()
+  })
+})
+
+describe('voice asset integrity', () => {
+  const digest = 'a'.repeat(64)
+
+  it('accepts only the reviewed size and digest', () => {
+    expect(voiceAssetIntegrityError(100, digest, 200, 100, digest)).toBeNull()
+  })
+
+  it('rejects truncated, modified, and oversized assets', () => {
+    expect(voiceAssetIntegrityError(100, digest, 200, 99, digest)).toMatch(/truncated/)
+    expect(voiceAssetIntegrityError(100, digest, 200, 100, 'b'.repeat(64))).toMatch(/SHA-256/)
+    expect(voiceAssetIntegrityError(300, digest, 200, 300, digest)).toMatch(/ceiling/)
   })
 })
 

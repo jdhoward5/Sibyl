@@ -68,4 +68,16 @@ describe('privacy invariant: message content is never logged', () => {
     }
     expect(offenders, `console.* logging private content:\n${offenders.join('\n')}`).toEqual([])
   })
+
+  it('the decrypted Hugging Face token has no renderer or preload representation', () => {
+    const offenders: string[] = []
+    for (const f of files) {
+      const relative = rel(f)
+      if (!relative.startsWith('renderer/') && !relative.startsWith('preload/')) continue
+      readFileSync(f, 'utf8').split('\n').forEach((line, i) => {
+        if (/\bhfToken\b/.test(line)) offenders.push(`${relative}:${i + 1}`)
+      })
+    }
+    expect(offenders, `Decrypted HF token exposed to renderer/preload:\n${offenders.join('\n')}`).toEqual([])
+  })
 })

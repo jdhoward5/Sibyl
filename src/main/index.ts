@@ -1,10 +1,16 @@
 import { app, BrowserWindow, session, shell } from 'electron'
 import squirrelStartup from 'electron-squirrel-startup'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 import { registerIpc } from './ipc'
 import { teardownGpu } from './shutdown'
 import { initUpdater, checkForUpdates } from './updater'
+import {
+  developmentRendererPolicy,
+  isAllowedRendererUrl,
+  isExternalWebUrl,
+  type RendererUrlPolicy
+} from '@shared/security'
 
 // Squirrel.Windows fires the installer/uninstaller by relaunching the app with
 // `--squirrel-{install,updated,uninstall,obsolete}`. electron-squirrel-startup
@@ -29,6 +35,14 @@ if (process.platform === 'win32' && !process.env.UV_THREADPOOL_SIZE) {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const isDev = !app.isPackaged
+const rendererFile = path.join(__dirname, '../renderer/index.html')
+
+function rendererUrlPolicy(): RendererUrlPolicy {
+  if (isDev && process.env.ELECTRON_RENDERER_URL) {
+    return developmentRendererPolicy(process.env.ELECTRON_RENDERER_URL)
+  }
+  return { kind: 'file', exactUrl: pathToFileURL(rendererFile).href }
+}
 
 // Lock to a single instance so model/download state isn't corrupted by two copies.
 if (!app.requestSingleInstanceLock()) {
@@ -85,7 +99,7 @@ function hardenSession(): void {
   ses.setPermissionCheckHandler(() => false)
 }
 
-function createWindow(): void {
+function createWindow(policy: RendererUrlPolicy): void {
   const isMac = process.platform === 'darwin'
   const win = new BrowserWindow({
     width: 1280,
@@ -105,10 +119,12 @@ function createWindow(): void {
       ? { trafficLightPosition: { x: 14, y: 13 } }
       : { titleBarOverlay: { color: '#0b0c14', symbolColor: '#8b8fa8', height: 40 } }),
     webPreferences: {
-      preload: path.join(__dirname, '../preload/index.mjs'),
+      preload: path.join(__dirname, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false, // preload needs Node to require the bridge; renderer stays isolated
+      // The preload uses only contextBridge/ipcRenderer plus bundled shared code,
+      // all of which are supported by Electron's restricted sandboxed preload.
+      sandbox: true,
       webSecurity: true,
       allowRunningInsecureContent: false,
       spellcheck: true
@@ -136,14 +152,12 @@ function createWindow(): void {
 
   // Block in-app navigation to anywhere but our own content; open links externally.
   win.webContents.on('will-navigate', (event, url) => {
-    const allowed = isDev && url.startsWith('http://localhost')
-    if (!allowed && !url.startsWith('file://')) {
-      event.preventDefault()
-      if (/^https?:\/\//.test(url)) void shell.openExternal(url)
-    }
+    if (isAllowedRendererUrl(url, policy)) return
+    event.preventDefault()
+    if (isExternalWebUrl(url)) void shell.openExternal(url)
   })
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//.test(url)) void shell.openExternal(url)
+    if (isExternalWebUrl(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
   // Reject attaching any non-preload webview / new webContents.
@@ -154,7 +168,7 @@ function createWindow(): void {
   if (isDev && process.env.ELECTRON_RENDERER_URL) {
     void win.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
-    void win.loadFile(path.join(__dirname, '../renderer/index.html'))
+    void win.loadFile(rendererFile)
   }
 }
 
@@ -350,10 +364,11 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
 }
 
 app.whenReady().then(() => {
+  const policy = rendererUrlPolicy()
   hardenSession()
-  registerIpc()
+  registerIpc(policy)
   initUpdater()
-  createWindow()
+  createWindow(policy)
 
   // Check GitHub for a newer release shortly after launch (packaged builds only;
   // the Squirrel updater is inert when unpackaged). Squirrel auto-downloads if one
@@ -363,7 +378,7 @@ app.whenReady().then(() => {
   }
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(policy)
   })
 })
 

@@ -219,6 +219,20 @@ export async function getRepoGgufFiles(repoId: string): Promise<Map<string, Repo
   return map
 }
 
+/**
+ * Confirm an exact repository-relative GGUF path exists in the selected repo's
+ * current tree. IPC calls use this before handing a filename to the downloader.
+ */
+export async function repoContainsGgufFile(repoId: string, filename: string): Promise<boolean> {
+  const entries = await fetchTree(repoId)
+  return entries.some(
+    (entry) =>
+      entry.type === 'file' &&
+      entry.path === filename &&
+      entry.path.toLowerCase().endsWith('.gguf')
+  )
+}
+
 /** Fetch and lightly clean the README for display. */
 async function fetchReadme(repoId: string): Promise<string | undefined> {
   try {

@@ -3,7 +3,6 @@
 // contract can never drift between the two sides.
 
 import type {
-  AppSettings,
   CompactionInfo,
   Conversation,
   ContextUsage,
@@ -14,6 +13,8 @@ import type {
   HFModelDetail,
   HFModelSummary,
   InstalledModel,
+  RendererSettings,
+  RendererSettingsPatch,
   Result,
   UpdateStatus
 } from './types'
@@ -65,6 +66,8 @@ export const IPC = {
   // Settings
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+  settingsSetHfToken: 'settings:setHfToken',
+  settingsClearHfToken: 'settings:clearHfToken',
 
   // Text-to-speech (on-device Piper voices)
   ttsStatus: 'tts:status',
@@ -189,8 +192,11 @@ export interface SibylBridge {
     export(id: string, format: ExportFormat): Promise<Result<{ saved: boolean; path?: string }>>
   }
   settings: {
-    get(): Promise<Result<AppSettings>>
-    set(patch: Partial<AppSettings>): Promise<Result<AppSettings>>
+    get(): Promise<Result<RendererSettings>>
+    set(patch: RendererSettingsPatch): Promise<Result<RendererSettings>>
+    /** Store or replace the token without ever echoing it back to the renderer. */
+    setHfToken(token: string): Promise<Result<void>>
+    clearHfToken(): Promise<Result<void>>
   }
   app: {
     info(): Promise<Result<AppInfo>>

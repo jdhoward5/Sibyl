@@ -1,6 +1,5 @@
 import { useSyncExternalStore } from 'react'
 import type {
-  AppSettings,
   ChatMessage,
   Conversation,
   ConversationOverrides,
@@ -11,6 +10,8 @@ import type {
   HFModelSummary,
   InstalledModel,
   Persona,
+  RendererSettings,
+  RendererSettingsPatch,
   UpdateStatus,
   UserCharacter
 } from '@shared/types'
@@ -55,7 +56,7 @@ export interface DiscoverState {
 export interface AppState {
   ready: boolean
   view: View
-  settings: AppSettings | null
+  settings: RendererSettings | null
   appInfo: AppInfo | null
   engine: EngineStatus
   conversations: Conversation[]
@@ -1219,7 +1220,7 @@ export const actions = {
   },
 
   // --- settings -----------------------------------------------------------
-  async updateSettings(patch: Partial<AppSettings>): Promise<void> {
+  async updateSettings(patch: RendererSettingsPatch): Promise<void> {
     const res = await window.sibyl.settings.set(patch)
     if (res.ok && res.data) {
       setState({ settings: res.data })
@@ -1229,6 +1230,26 @@ export const actions = {
     } else {
       toast(res.error ?? 'Failed to save settings', 'error')
     }
+  },
+
+  async setHfToken(token: string): Promise<boolean> {
+    const res = await window.sibyl.settings.setHfToken(token)
+    if (!res.ok) {
+      toast(res.error ?? 'Failed to save Hugging Face token', 'error')
+      return false
+    }
+    if (state.settings) setState({ settings: { ...state.settings, hfTokenConfigured: true } })
+    return true
+  },
+
+  async clearHfToken(): Promise<boolean> {
+    const res = await window.sibyl.settings.clearHfToken()
+    if (!res.ok) {
+      toast(res.error ?? 'Failed to clear Hugging Face token', 'error')
+      return false
+    }
+    if (state.settings) setState({ settings: { ...state.settings, hfTokenConfigured: false } })
+    return true
   },
 
   // --- text-to-speech -----------------------------------------------------

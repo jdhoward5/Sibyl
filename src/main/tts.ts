@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
-import { createWriteStream, promises as fs } from 'node:fs'
+import { createReadStream, createWriteStream, promises as fs } from 'node:fs'
 import { once } from 'node:events'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import type { InstalledVoice, PiperVoiceConfig, TtsEvent, TtsStatus, TtsVoiceDownload } from '@shared/tts'
@@ -10,6 +10,7 @@ import {
   phonemesToIds,
   plainTextForSpeech,
   splitPhonemes,
+  voiceAssetIntegrityError,
   voiceConfigUrl,
   voiceModelUrl
 } from '@shared/tts'
@@ -67,6 +68,9 @@ interface VoiceDownloadJob {
   controller: AbortController
   progress: TtsVoiceDownload
 }
+
+const MAX_TTS_MODEL_BYTES = 200 * 1024 * 1024
+const MAX_TTS_CONFIG_BYTES = 1024 * 1024
 
 /**
  * On-device text-to-speech via Piper (VITS) ONNX voices. Owns one loaded voice
@@ -155,14 +159,34 @@ class TtsEngine extends EventEmitter {
       const token = settings.hfToken
       const modelDest = path.join(dir, `${voice.id}.onnx`)
       const configDest = path.join(dir, `${voice.id}.onnx.json`)
+      const stageDir = path.join(dir, '.staging', `${voice.id}-${randomUUID()}`)
+      const stagedModel = path.join(stageDir, `${voice.id}.onnx`)
+      const stagedConfig = path.join(stageDir, `${voice.id}.onnx.json`)
+      await fs.mkdir(stageDir, { recursive: true })
 
-      // The config is tiny; fetch it first so a bad voice fails fast and cheap.
-      await fetchToFile(voiceConfigUrl(voice), configDest, token, controller.signal)
-      const modelBytes = await fetchToFile(
-        voiceModelUrl(voice),
-        modelDest,
+      // Download and verify both immutable assets in an isolated staging
+      // directory. Existing working files are untouched until both pass.
+      await fetchToFile(
+        voiceConfigUrl(voice),
+        stagedConfig,
         token,
         controller.signal,
+        {
+          expectedBytes: voice.configSizeBytes,
+          expectedSha256: voice.configSha256,
+          maxBytes: MAX_TTS_CONFIG_BYTES
+        }
+      )
+      const modelBytes = await fetchToFile(
+        voiceModelUrl(voice),
+        stagedModel,
+        token,
+        controller.signal,
+        {
+          expectedBytes: voice.sizeBytes,
+          expectedSha256: voice.modelSha256,
+          maxBytes: MAX_TTS_MODEL_BYTES
+        },
         (received, total) => {
           job.progress.receivedBytes = received
           if (total > 0) job.progress.totalBytes = total
@@ -170,6 +194,19 @@ class TtsEngine extends EventEmitter {
         }
       )
 
+      // Reject malformed JSON before it can replace a working config or reach
+      // the ONNX loader.
+      controller.signal.throwIfAborted()
+      JSON.parse(await fs.readFile(stagedConfig, 'utf8'))
+      await commitVoiceFiles(
+        [
+          { staged: stagedModel, destination: modelDest },
+          { staged: stagedConfig, destination: configDest }
+        ],
+        stageDir
+      )
+
+      controller.signal.throwIfAborted()
       await upsertInstalledVoice({
         id: voice.id,
         name: voice.name,
@@ -189,10 +226,18 @@ class TtsEngine extends EventEmitter {
       job.progress.status = aborted ? 'cancelled' : 'error'
       if (!aborted) job.progress.error = err instanceof Error ? err.message : String(err)
       this.emitVoiceProgress(job.progress)
-      // Clean partial files so a retry starts fresh.
-      await this.removeVoiceFiles(voiceId).catch(() => {})
     } finally {
       this.downloads.delete(voiceId)
+      const dir = await getVoicesDir().catch(() => null)
+      if (dir) {
+        const stagingRoot = path.join(dir, '.staging')
+        const entries = await fs.readdir(stagingRoot).catch(() => [])
+        await Promise.all(
+          entries
+            .filter((name) => name.startsWith(`${voiceId}-`))
+            .map((name) => fs.rm(path.join(stagingRoot, name), { recursive: true, force: true }).catch(() => {}))
+        )
+      }
     }
   }
 
@@ -220,16 +265,6 @@ class TtsEngine extends EventEmitter {
     }
   }
 
-  /** Remove a catalog voice's files from the voices dir (used to clean a failed download). */
-  private async removeVoiceFiles(voiceId: string): Promise<void> {
-    const dir = await getVoicesDir()
-    await Promise.all(
-      [`${voiceId}.onnx`, `${voiceId}.onnx.json`, `${voiceId}.onnx.part`, `${voiceId}.onnx.json.part`].map(
-        (f) => fs.rm(path.join(dir, f), { force: true }).catch(() => {})
-      )
-    )
-  }
-
   // -- synthesis ------------------------------------------------------------
 
   private async releaseSession(): Promise<void> {
@@ -248,6 +283,22 @@ class TtsEngine extends EventEmitter {
   private async loadVoice(voice: InstalledVoice): Promise<LoadedVoice> {
     if (this.loaded?.id === voice.id) return this.loaded
     await this.releaseSession()
+    const catalogVoice = findCatalogVoice(voice.id)
+    if (!catalogVoice) throw new Error('This installed voice is not in the reviewed catalog.')
+    await Promise.all([
+      verifyLocalVoiceAsset(
+        voice.modelPath,
+        catalogVoice.sizeBytes,
+        catalogVoice.modelSha256,
+        MAX_TTS_MODEL_BYTES
+      ),
+      verifyLocalVoiceAsset(
+        voice.configPath,
+        catalogVoice.configSizeBytes,
+        catalogVoice.configSha256,
+        MAX_TTS_CONFIG_BYTES
+      )
+    ])
     const ort = await getOrt()
     const configRaw = await fs.readFile(voice.configPath, 'utf8')
     const config = JSON.parse(configRaw) as PiperVoiceConfig
@@ -402,15 +453,84 @@ class TtsEngine extends EventEmitter {
   }
 }
 
+interface DownloadIntegrity {
+  expectedBytes: number
+  expectedSha256: string
+  maxBytes: number
+}
+
+/** Verify an installed asset before handing it to JSON/ONNX parsers. */
+async function verifyLocalVoiceAsset(
+  filePath: string,
+  expectedBytes: number,
+  expectedSha256: string,
+  maxBytes: number
+): Promise<void> {
+  const hash = createHash('sha256')
+  let actualBytes = 0
+  for await (const chunk of createReadStream(filePath)) {
+    const buffer = chunk as Buffer
+    actualBytes += buffer.length
+    if (actualBytes > expectedBytes || actualBytes > maxBytes) {
+      throw new Error('Installed voice asset exceeded its reviewed size.')
+    }
+    hash.update(buffer)
+  }
+  const error = voiceAssetIntegrityError(
+    expectedBytes,
+    expectedSha256,
+    maxBytes,
+    actualBytes,
+    hash.digest('hex')
+  )
+  if (error) throw new Error(`Installed ${error.toLowerCase()}`)
+}
+
 /**
- * Stream an HTTP response to a file with progress, via a `.part` temp that is
- * renamed on success. Cleans up the temp on error/abort.
+ * Replace a voice's model/config as one recoverable transaction. Existing
+ * assets are moved to same-volume backups and restored if either rename fails.
+ */
+async function commitVoiceFiles(
+  files: { staged: string; destination: string }[],
+  stageDir: string
+): Promise<void> {
+  const backups: { destination: string; backup: string }[] = []
+  const installed: string[] = []
+  try {
+    for (const { destination } of files) {
+      try {
+        await fs.access(destination)
+      } catch {
+        continue
+      }
+      const backup = path.join(stageDir, `${path.basename(destination)}.backup`)
+      await fs.rename(destination, backup)
+      backups.push({ destination, backup })
+    }
+    for (const { staged, destination } of files) {
+      await fs.rename(staged, destination)
+      installed.push(destination)
+    }
+    await Promise.all(backups.map(({ backup }) => fs.rm(backup, { force: true })))
+  } catch (err) {
+    await Promise.all(installed.map((destination) => fs.rm(destination, { force: true }).catch(() => {})))
+    for (const { destination, backup } of backups.reverse()) {
+      await fs.rename(backup, destination).catch(() => {})
+    }
+    throw err
+  }
+}
+
+/**
+ * Stream an immutable asset to a staging file with strict byte ceilings, exact
+ * size verification, and SHA-256 verification before rename.
  */
 async function fetchToFile(
   url: string,
   dest: string,
   token: string | null,
   signal: AbortSignal,
+  integrity: DownloadIntegrity,
   onProgress?: (received: number, total: number) => void
 ): Promise<number> {
   const res = await fetch(url, {
@@ -419,20 +539,40 @@ async function fetchToFile(
   })
   if (!res.ok || !res.body) throw new Error(`Download failed (HTTP ${res.status}).`)
   const total = Number(res.headers.get('content-length')) || 0
+  if (integrity.expectedBytes > integrity.maxBytes) {
+    throw new Error('Voice asset exceeds the configured safety ceiling.')
+  }
+  if (total > integrity.maxBytes || (total > 0 && total !== integrity.expectedBytes)) {
+    throw new Error('Voice asset response size did not match the reviewed catalog.')
+  }
   const tmp = `${dest}.part`
   const out = createWriteStream(tmp)
+  const hash = createHash('sha256')
   let received = 0
   try {
     const nodeStream = Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0])
     for await (const chunk of nodeStream) {
       const buf = chunk as Buffer
       received += buf.length
+      if (received > integrity.expectedBytes || received > integrity.maxBytes) {
+        throw new Error('Voice asset exceeded its reviewed size.')
+      }
+      hash.update(buf)
       if (!out.write(buf)) await once(out, 'drain')
       onProgress?.(received, total)
     }
     await new Promise<void>((resolve, reject) =>
       out.end((err?: Error | null) => (err ? reject(err) : resolve()))
     )
+    const digest = hash.digest('hex')
+    const integrityError = voiceAssetIntegrityError(
+      integrity.expectedBytes,
+      integrity.expectedSha256,
+      integrity.maxBytes,
+      received,
+      digest
+    )
+    if (integrityError) throw new Error(integrityError)
     await fs.rename(tmp, dest)
     return received
   } catch (err) {
