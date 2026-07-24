@@ -404,6 +404,9 @@ function SceneStrip({
 
 export function ChatView() {
   const conversation = useStore((s) => s.conversations.find((c) => c.id === s.activeConversationId))
+  const unsaved = useStore((s) =>
+    conversation ? s.unsavedConversationIds.includes(conversation.id) : false
+  )
   const personas = useStore((s) => s.settings?.personas ?? [])
   const pickerOpen = useStore((s) => s.personaPickerOpen)
   const hasConversations = useStore((s) => s.conversations.length > 0)
@@ -498,6 +501,12 @@ export function ChatView() {
                 }}
                 onThreadSettings={() => setSettingsOpen(true)}
               />
+            )}
+
+            {unsaved && (
+              <div className="shrink-0 border-b border-amber-400/25 bg-amber-400/10 px-4 py-1.5 text-center text-[11.5px] text-amber-200">
+                Changes are only in memory because the conversation could not be saved.
+              </div>
             )}
 
             {findOpen && (

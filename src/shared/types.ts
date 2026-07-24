@@ -92,6 +92,20 @@ export interface InstalledModel {
    */
   local?: boolean
   installedAt: string
+  /** Current filesystem reachability; registry entries are retained while unavailable. */
+  availability?: ResourceAvailability
+  /** Human-readable reason when `availability !== 'available'`. */
+  availabilityError?: string
+}
+
+export type ResourceAvailability = 'available' | 'missing' | 'unavailable' | 'unreadable'
+
+export interface StorageIssue {
+  resource: 'models' | 'voices'
+  kind: 'malformed' | 'unreadable'
+  message: string
+  /** A quarantined recovery copy exists and can be revealed to the user. */
+  recoverable: boolean
 }
 
 export interface ChatMessage {
@@ -103,6 +117,8 @@ export interface ChatMessage {
   stats?: GenerationStats
   /** Set on an assistant message when its generation failed; drives the retry UI. */
   error?: string
+  /** A user-stopped partial response remains editable/retryable. */
+  stopped?: boolean
   /**
    * Scene beats only: the persona id of the AI character who spoke this line.
    * Absent on the human's own turns. A scene interleaves many speakers, so a beat
@@ -370,13 +386,24 @@ export type RendererSettingsPatch = Partial<
 >
 
 export interface EngineStatus {
-  state: 'idle' | 'loading' | 'ready' | 'generating' | 'error'
+  state: 'idle' | 'loading' | 'ready' | 'generating' | 'unloading' | 'shutting-down' | 'error'
   modelId: string | null
   gpuType: 'cuda' | 'vulkan' | 'metal' | false | null
   vramTotalBytes: number | null
   vramUsedBytes: number | null
   contextSize: number | null
   error?: string
+  operation?: EngineOperation
+}
+
+export type EngineOperationKind = 'load' | 'unload' | 'generate' | 'scene-beat' | 'compact' | 'shutdown'
+
+export interface EngineOperation {
+  id: string
+  kind: EngineOperationKind
+  conversationId?: string
+  messageId?: string
+  modelId?: string
 }
 
 /**
@@ -443,6 +470,7 @@ export interface ContextUsage {
 export type GenerationEvent =
   | { type: 'token'; conversationId: string; messageId: string; text: string }
   | { type: 'done'; conversationId: string; messageId: string; stats: GenerationStats }
+  | { type: 'aborted'; conversationId: string; messageId: string; stats: GenerationStats }
   | { type: 'error'; conversationId: string; messageId: string; error: string }
 
 export interface Result<T> {

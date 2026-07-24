@@ -36,7 +36,8 @@ const bridge: SibylBridge = {
     list: () => ipcRenderer.invoke(IPC.modelsList),
     delete: (id) => ipcRenderer.invoke(IPC.modelsDelete, id),
     reveal: (id) => ipcRenderer.invoke(IPC.modelsReveal, id),
-    import: () => ipcRenderer.invoke(IPC.modelsImport)
+    import: () => ipcRenderer.invoke(IPC.modelsImport),
+    locate: (id) => ipcRenderer.invoke(IPC.modelsLocate, id)
   },
   engine: {
     load: (modelId) => ipcRenderer.invoke(IPC.engineLoad, modelId),
@@ -47,7 +48,7 @@ const bridge: SibylBridge = {
   chat: {
     send: (req: ChatSendRequest) => ipcRenderer.invoke(IPC.chatSend, req),
     advance: (req: ChatAdvanceRequest) => ipcRenderer.invoke(IPC.chatAdvance, req),
-    abort: (conversationId) => ipcRenderer.invoke(IPC.chatAbort, conversationId),
+    abort: (req) => ipcRenderer.invoke(IPC.chatAbort, req),
     compact: (conversationId) => ipcRenderer.invoke(IPC.chatCompact, conversationId),
     invalidateSession: (conversationId) => ipcRenderer.invoke(IPC.chatInvalidate, conversationId),
     onEvent: (cb) => subscribe(IPC.chatEvent, cb)
@@ -70,7 +71,9 @@ const bridge: SibylBridge = {
     clearHfToken: () => ipcRenderer.invoke(IPC.settingsClearHfToken)
   },
   app: {
-    info: () => ipcRenderer.invoke(IPC.appInfo)
+    info: () => ipcRenderer.invoke(IPC.appInfo),
+    storageIssues: () => ipcRenderer.invoke(IPC.storageIssues),
+    revealRecovery: (resource) => ipcRenderer.invoke(IPC.storageRevealRecovery, resource)
   },
   tts: {
     status: () => ipcRenderer.invoke(IPC.ttsStatus),

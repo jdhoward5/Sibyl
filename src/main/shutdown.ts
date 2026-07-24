@@ -23,7 +23,7 @@ export function teardownGpu(): Promise<void> {
         /* ignore */
       }
       try {
-        await engine.unload()
+        await engine.shutdown()
       } catch {
         /* ignore */
       }

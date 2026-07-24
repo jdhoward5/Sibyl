@@ -16,6 +16,7 @@ import type {
   RendererSettings,
   RendererSettingsPatch,
   Result,
+  StorageIssue,
   UpdateStatus
 } from './types'
 import type { ExportFormat } from './export'
@@ -37,6 +38,9 @@ export const IPC = {
   modelsDelete: 'models:delete',
   modelsReveal: 'models:reveal',
   modelsImport: 'models:import', // pick a pre-downloaded .gguf and register it in place
+  modelsLocate: 'models:locate',
+  storageIssues: 'storage:issues',
+  storageRevealRecovery: 'storage:revealRecovery',
 
   // Engine / inference
   engineLoad: 'engine:load',
@@ -110,6 +114,12 @@ export interface ChatAdvanceRequest {
   options?: Partial<GenerationOptions>
 }
 
+export interface ChatAbortRequest {
+  conversationId: string
+  messageId: string
+  operationId?: string
+}
+
 export interface TtsSpeakRequest {
   /** The assistant message this speech belongs to (drives the UI highlight). */
   messageId: string
@@ -156,6 +166,8 @@ export interface SibylBridge {
      * Resolves to the new model, or `null` when the user cancels the dialog.
      */
     import(): Promise<Result<InstalledModel | null>>
+    /** Locate a moved/unavailable model and update its existing registry entry. */
+    locate(id: string): Promise<Result<InstalledModel | null>>
   }
   engine: {
     load(modelId: string): Promise<Result<EngineStatus>>
@@ -167,7 +179,7 @@ export interface SibylBridge {
     send(req: ChatSendRequest): Promise<Result<void>>
     /** Generate the next beat of a self-roleplay scene (one cast persona speaks). */
     advance(req: ChatAdvanceRequest): Promise<Result<void>>
-    abort(conversationId: string): Promise<Result<void>>
+    abort(req: ChatAbortRequest): Promise<Result<{ aborted: boolean }>>
     /** Summarize older turns of a conversation into a compaction record. */
     compact(conversationId: string): Promise<Result<CompactionInfo>>
     /**
@@ -200,6 +212,8 @@ export interface SibylBridge {
   }
   app: {
     info(): Promise<Result<AppInfo>>
+    storageIssues(): Promise<Result<StorageIssue[]>>
+    revealRecovery(resource: StorageIssue['resource']): Promise<Result<void>>
   }
   tts: {
     /** Current speech-subsystem status (availability + what's speaking). */

@@ -4,6 +4,7 @@ import type { IpcMainInvokeEvent } from 'electron'
 import {
   IPC,
   type AppInfo,
+  type ChatAbortRequest,
   type ChatSendRequest,
   type ChatAdvanceRequest,
   type TtsSpeakRequest
@@ -17,7 +18,7 @@ import type {
   Result
 } from '@shared/types'
 import { getModelDetail, repoContainsGgufFile, searchModels } from './hf'
-import { downloadManager } from './downloads'
+import { deleteInstalledModel, downloadManager } from './downloads'
 import { engine } from './engine'
 import { tts } from './tts'
 import { updater } from './updater'
@@ -32,7 +33,9 @@ import {
   listConversations,
   listInstalledModels,
   listInstalledVoices,
-  removeInstalledModel,
+  listStorageIssues,
+  recoveryPathFor,
+  relocateInstalledModel,
   saveConversation,
   setSettings,
   settingsForRenderer
@@ -42,6 +45,7 @@ import {
   assertChatSendState,
   parseArgs,
   parseCanonicalId,
+  parseChatAbortRequest,
   parseChatAdvanceRequest,
   parseChatSendRequest,
   parseConversation,
@@ -159,19 +163,11 @@ export function registerIpc(policy: RendererUrlPolicy): void {
   // --- Installed models ---------------------------------------------------
   handle(IPC.modelsList, policy, parseNoArgs, async () => listInstalledModels())
   handle(IPC.modelsDelete, policy, (args) => parseArgs<[string]>(args, (v) => parseModelId(v)), async (_e, id) => {
-    if (engine && (await engine.status()).modelId === id) {
+    const status = await engine.status()
+    if (status.modelId === id || status.operation?.modelId === id) {
       await engine.unload()
     }
-    const removed = await removeInstalledModel(id)
-    // Only delete files Sibyl fetched. A locally-imported model points at the
-    // user's own file, registered in place — deregister it but never unlink it.
-    if (removed && !removed.local) {
-      try {
-        await fs.unlink(removed.path)
-      } catch {
-        /* file may already be gone */
-      }
-    }
+    await deleteInstalledModel(id)
   })
   handle(IPC.modelsReveal, policy, (args) => parseArgs<[string]>(args, (v) => parseModelId(v)), async (_e, id) => {
     const model = await getInstalledModel(id)
@@ -190,6 +186,17 @@ export function registerIpc(policy: RendererUrlPolicy): void {
     if (result.canceled || result.filePaths.length === 0) return null
     return importLocalModel(result.filePaths[0])
   })
+  handle(IPC.modelsLocate, policy, (args) => parseArgs<[string]>(args, (v) => parseModelId(v)), async (_e, id) => {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    const opts = {
+      title: 'Locate the GGUF model file',
+      properties: ['openFile' as const],
+      filters: [{ name: 'GGUF models', extensions: ['gguf'] }]
+    }
+    const result = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts)
+    if (result.canceled || result.filePaths.length === 0) return null
+    return relocateInstalledModel(id, result.filePaths[0])
+  })
 
   // --- Engine -------------------------------------------------------------
   handle(IPC.engineLoad, policy, (args) => parseArgs<[string]>(args, (v) => parseModelId(v)), async (_e, modelId) => engine.load(modelId))
@@ -204,17 +211,17 @@ export function registerIpc(policy: RendererUrlPolicy): void {
     if (!conversation) throw new Error(`Conversation not found: ${req.conversationId}`)
     assertChatSendState(conversation, req)
     // Fire generation; streaming events flow over IPC.chatEvent.
-    void engine.generate(conversation, req.message, req.assistantMessageId, req.options)
+    void engine.generate(conversation, req.message, req.assistantMessageId, req.options).catch(() => {})
   })
   handle(IPC.chatAdvance, policy, (args) => parseArgs<[ChatAdvanceRequest]>(args, parseChatAdvanceRequest), async (_e, req) => {
     const conversation = await getConversation(req.conversationId)
     if (!conversation) throw new Error(`Conversation not found: ${req.conversationId}`)
     assertChatAdvanceState(conversation, req)
     // Generate one scene beat; streaming events flow over the same IPC.chatEvent.
-    void engine.generateBeat(conversation, req.speakerId, req.assistantMessageId, req.options)
+    void engine.generateBeat(conversation, req.speakerId, req.assistantMessageId, req.options).catch(() => {})
   })
-  handle(IPC.chatAbort, policy, (args) => parseArgs<[string]>(args, (v) => parseCanonicalId(v, 'conversationId')), async (_e, _conversationId) => {
-    engine.abortGeneration()
+  handle(IPC.chatAbort, policy, (args) => parseArgs<[ChatAbortRequest]>(args, parseChatAbortRequest), async (_e, req) => {
+    return { aborted: engine.abortGeneration(req) }
   })
   handle(IPC.chatCompact, policy, (args) => parseArgs<[string]>(args, (v) => parseCanonicalId(v, 'conversationId')), async (_e, conversationId) => {
     const conversation = await getConversation(conversationId)
@@ -304,6 +311,21 @@ export function registerIpc(policy: RendererUrlPolicy): void {
       secureStorageAvailable: isSecureStorageAvailable()
     }
   })
+  handle(IPC.storageIssues, policy, parseNoArgs, async () => listStorageIssues())
+  handle(
+    IPC.storageRevealRecovery,
+    policy,
+    (args) =>
+      parseArgs<['models' | 'voices']>(args, (value) => {
+        if (value !== 'models' && value !== 'voices') throw new Error('Invalid storage resource.')
+        return value
+      }),
+    async (_e, resource) => {
+      const recoveryPath = recoveryPathFor(resource)
+      if (!recoveryPath) throw new Error('No recovery copy is available.')
+      shell.showItemInFolder(recoveryPath)
+    }
+  )
 
   // --- Text-to-speech -----------------------------------------------------
   handle(IPC.ttsStatus, policy, parseNoArgs, async () => tts.status())
@@ -311,7 +333,7 @@ export function registerIpc(policy: RendererUrlPolicy): void {
   handle(IPC.ttsVoiceDownloads, policy, parseNoArgs, async () => tts.listVoiceDownloads())
   handle(IPC.ttsVoiceDownload, policy, (args) => parseArgs<[string]>(args, (v) => parseCanonicalId(v, 'voiceId')), async (_e, voiceId) => {
     // Fire-and-forget; progress flows over IPC.ttsVoiceProgress.
-    void tts.downloadVoice(voiceId)
+    void Promise.resolve(tts.downloadVoice(voiceId)).catch(() => {})
   })
   handle(IPC.ttsVoiceCancel, policy, (args) => parseArgs<[string]>(args, (v) => parseCanonicalId(v, 'voiceId')), async (_e, voiceId) => {
     tts.cancelVoiceDownload(voiceId)
@@ -321,7 +343,9 @@ export function registerIpc(policy: RendererUrlPolicy): void {
   })
   handle(IPC.ttsSpeak, policy, (args) => parseArgs<[TtsSpeakRequest]>(args, parseTtsSpeakRequest), async (_e, req) => {
     // Privacy: req.text is message content — synthesized locally, never logged.
-    void tts.speak(req.messageId, req.text, { voiceId: req.voiceId, rate: req.rate })
+    void Promise.resolve(
+      tts.speak(req.messageId, req.text, { voiceId: req.voiceId, rate: req.rate })
+    ).catch(() => {})
   })
   handle(IPC.ttsStop, policy, parseNoArgs, async () => {
     tts.stop()

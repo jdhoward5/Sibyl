@@ -218,7 +218,7 @@ function MessageImpl({
             <Markdown source={message.content} tintQuotes />
             {streaming && <span className="caret" />}
           </div>
-        ) : message.error ? null : (
+        ) : message.error || message.stopped ? null : (
           <div className="flex items-center gap-1 py-2">
             <span className="h-2 w-2 animate-pulse-glow rounded-full bg-sibyl-accent" />
             <span className="h-2 w-2 animate-pulse-glow rounded-full bg-sibyl-accent [animation-delay:0.2s]" />
@@ -236,6 +236,20 @@ function MessageImpl({
           <div className="mt-1 flex items-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-[12.5px] text-red-200">
             <AlertTriangleIcon size={15} className="shrink-0 text-red-400" />
             <span className="flex-1">{message.error}</span>
+            <button
+              onClick={() => void actions.regenerate(message.id)}
+              disabled={generating}
+              className="btn-surface shrink-0 px-2.5 py-1 text-[12px] disabled:opacity-40"
+            >
+              <RefreshIcon size={13} /> Retry
+            </button>
+          </div>
+        )}
+
+        {message.stopped && (
+          <div className="mt-1 flex items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[12.5px] text-amber-200">
+            <StopIcon size={14} className="shrink-0" />
+            <span className="flex-1">Stopped — partial response kept</span>
             <button
               onClick={() => void actions.regenerate(message.id)}
               disabled={generating}

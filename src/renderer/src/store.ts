@@ -12,6 +12,7 @@ import type {
   Persona,
   RendererSettings,
   RendererSettingsPatch,
+  StorageIssue,
   UpdateStatus,
   UserCharacter
 } from '@shared/types'
@@ -88,6 +89,9 @@ export interface AppState {
    * `convId` pins the loop to one conversation; null means manual/stopped.
    */
   scenePlay: { convId: string } | null
+  /** Conversation snapshots whose last durable save failed. */
+  unsavedConversationIds: string[]
+  storageIssues: StorageIssue[]
 }
 
 const initialState: AppState = {
@@ -126,7 +130,9 @@ const initialState: AppState = {
   installedVoices: [],
   voiceDownloads: {},
   speakingMessageId: null,
-  scenePlay: null
+  scenePlay: null,
+  unsavedConversationIds: [],
+  storageIssues: []
 }
 
 let state: AppState = initialState
@@ -198,8 +204,56 @@ function updateConversation(id: string, fn: (c: Conversation) => Conversation): 
   }))
 }
 
-function persist(conversation: Conversation): void {
-  void window.sibyl.conversations.save(conversation)
+async function persist(conversation: Conversation): Promise<boolean> {
+  const result = await window.sibyl.conversations.save(conversation)
+  if (result.ok) {
+    setState((s) => ({
+      unsavedConversationIds: s.unsavedConversationIds.filter((id) => id !== conversation.id)
+    }))
+    return true
+  }
+  setState((s) => ({
+    unsavedConversationIds: s.unsavedConversationIds.includes(conversation.id)
+      ? s.unsavedConversationIds
+      : [...s.unsavedConversationIds, conversation.id]
+  }))
+  toast(result.error ?? 'Conversation could not be saved. Changes remain in memory.', 'error')
+  return false
+}
+
+let confirmedSettings: RendererSettings | null = null
+let pendingTextSettings: RendererSettingsPatch | null = null
+let settingsTextTimer: ReturnType<typeof setTimeout> | null = null
+
+function mergeSettingsPatch(
+  current: RendererSettings,
+  patch: RendererSettingsPatch
+): RendererSettings {
+  return {
+    ...current,
+    ...patch,
+    generation: { ...current.generation, ...(patch.generation ?? {}) },
+    load: { ...current.load, ...(patch.load ?? {}) },
+    context: { ...current.context, ...(patch.context ?? {}) },
+    tts: { ...current.tts, ...(patch.tts ?? {}) }
+  }
+}
+
+async function flushPendingTextSettings(): Promise<boolean> {
+  if (settingsTextTimer) clearTimeout(settingsTextTimer)
+  settingsTextTimer = null
+  const patch = pendingTextSettings
+  pendingTextSettings = null
+  if (!patch) return true
+  const res = await window.sibyl.settings.set(patch)
+  if (res.ok && res.data) {
+    confirmedSettings = res.data
+    setState({ settings: res.data })
+    return true
+  }
+  if (confirmedSettings) setState({ settings: confirmedSettings })
+  toast(res.error ?? 'Failed to save settings; the last confirmed values were restored.', 'error')
+  return false
 }
 
 /**
@@ -212,7 +266,12 @@ function ttsReadiness(): { ok: true; voiceId: string } | { ok: false; reason: st
   if (!state.tts?.available) {
     return { ok: false, reason: state.tts?.error ?? 'Speech is unavailable in this build.' }
   }
-  if (!s.voiceId || !state.installedVoices.some((v) => v.id === s.voiceId)) {
+  if (
+    !s.voiceId ||
+    !state.installedVoices.some(
+      (v) => v.id === s.voiceId && (!v.availability || v.availability === 'available')
+    )
+  ) {
     return { ok: false, reason: 'Choose a voice in Settings → Voice & speech.' }
   }
   return { ok: true, voiceId: s.voiceId }
@@ -236,7 +295,9 @@ export function canSpeak(s: AppState): boolean {
     t?.enabled &&
       s.tts?.available &&
       t.voiceId &&
-      s.installedVoices.some((v) => v.id === t.voiceId)
+      s.installedVoices.some(
+        (v) => v.id === t.voiceId && (!v.availability || v.availability === 'available')
+      )
   )
 }
 
@@ -273,14 +334,18 @@ async function runTurn(
   updateConversation(conv.id, () => updated)
   // Persist the truncated history and invalidate before sending so the engine
   // rebuilds its session from this new state rather than the stale KV cache.
-  await window.sibyl.conversations.save(updated)
+  if (!(await persist(updated))) return
   await window.sibyl.chat.invalidateSession(conv.id)
+  setState({ streamStats: { messageId: assistantId, startedAt: Date.now(), tokens: 0 } })
   const res = await window.sibyl.chat.send({
     conversationId: conv.id,
     message: userText,
     assistantMessageId: assistantId
   })
-  if (!res.ok) toast(res.error ?? 'Failed to send message', 'error')
+  if (!res.ok) {
+    setState({ streamStats: null })
+    toast(res.error ?? 'Failed to send message', 'error')
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +372,7 @@ export const actions = {
     if (initialized) return
     initialized = true
 
-    const [settingsRes, infoRes, modelsRes, convRes, statusRes, dlRes, updateRes, ttsRes, voicesRes, voiceDlRes] =
+    const [settingsRes, infoRes, modelsRes, convRes, statusRes, dlRes, updateRes, ttsRes, voicesRes, voiceDlRes, issuesRes] =
       await Promise.all([
         window.sibyl.settings.get(),
         window.sibyl.app.info(),
@@ -318,13 +383,15 @@ export const actions = {
         window.sibyl.update.status(),
         window.sibyl.tts.status(),
         window.sibyl.tts.listVoices(),
-        window.sibyl.tts.listDownloads()
+        window.sibyl.tts.listDownloads(),
+        window.sibyl.app.storageIssues()
       ])
 
     const downloads: Record<string, DownloadProgress> = {}
     if (dlRes.ok && dlRes.data) for (const d of dlRes.data) downloads[d.id] = d
     const voiceDownloads: Record<string, TtsVoiceDownload> = {}
     if (voiceDlRes.ok && voiceDlRes.data) for (const d of voiceDlRes.data) voiceDownloads[d.voiceId] = d
+    const finalIssuesRes = await window.sibyl.app.storageIssues()
 
     setState({
       ready: true,
@@ -338,8 +405,10 @@ export const actions = {
       activeConversationId: convRes.data?.[0]?.id ?? null,
       tts: ttsRes.data ?? null,
       installedVoices: voicesRes.data ?? [],
-      voiceDownloads
+      voiceDownloads,
+      storageIssues: finalIssuesRes.data ?? issuesRes.data ?? []
     })
+    confirmedSettings = settingsRes.data ?? null
 
     // Wire the audio player: it is the source of truth for what's audibly speaking.
     ttsPlayer.init({ onSpeakingChange: (id) => setState({ speakingMessageId: id }) })
@@ -456,6 +525,24 @@ export const actions = {
         actions.maybeAutoSpeak(e.messageId, finishedText)
         // Drive scene autoplay forward to the next character's beat.
         if (state.scenePlay?.convId === e.conversationId) actions.scheduleNextBeat()
+      } else if (e.type === 'aborted') {
+        beatInFlight = false
+        updateConversation(e.conversationId, (c) => {
+          const updated = {
+            ...c,
+            updatedAt: now(),
+            messages: c.messages.map((m) =>
+              m.id === e.messageId
+                ? { ...m, stats: e.stats, error: undefined, stopped: true }
+                : m
+            )
+          }
+          void persist(updated)
+          return updated
+        })
+        setState({ streamStats: null })
+        if (state.scenePlay?.convId === e.conversationId) actions.stopScenePlay()
+        toast('Generation stopped — the partial response was kept.', 'info')
       } else if (e.type === 'error') {
         beatInFlight = false // beat failed — release the in-flight guard
         updateConversation(e.conversationId, (c) => {
@@ -641,9 +728,14 @@ export const actions = {
         saved = { ...c, modelId: state.engine.modelId, messages: [...c.messages, beat], updatedAt: now() }
         return saved
       })
-      if (saved) await window.sibyl.conversations.save(saved)
+      if (saved && !(await persist(saved))) {
+        beatInFlight = false
+        if (state.scenePlay) actions.stopScenePlay()
+        return
+      }
       // The active speaker (and system prompt) changed — force a fresh rebuild.
       await window.sibyl.chat.invalidateSession(conversationId)
+      setState({ streamStats: { messageId: beat.id, startedAt: Date.now(), tokens: 0 } })
       const res = await window.sibyl.chat.advance({
         conversationId,
         speakerId: sid,
@@ -653,6 +745,7 @@ export const actions = {
       // a failed kickoff produces no such event, so release it here.
       if (!res.ok) {
         beatInFlight = false
+        setState({ streamStats: null })
         toast(res.error ?? 'Failed to advance the scene', 'error')
         if (state.scenePlay) actions.stopScenePlay()
       }
@@ -677,7 +770,7 @@ export const actions = {
       saved = { ...c, messages: [...c.messages, msg], updatedAt: now() }
       return saved
     })
-    if (saved) await window.sibyl.conversations.save(saved)
+    if (saved && !(await persist(saved))) return
     await window.sibyl.chat.invalidateSession(conv.id)
     await actions.advanceScene()
   },
@@ -696,7 +789,7 @@ export const actions = {
       saved = { ...c, messages: [...c.messages, note], updatedAt: now() }
       return saved
     })
-    if (saved) await window.sibyl.conversations.save(saved)
+    if (saved && !(await persist(saved))) return
     await window.sibyl.chat.invalidateSession(conv.id)
     await actions.advanceScene()
   },
@@ -830,7 +923,7 @@ export const actions = {
     if (!conv) return
     const updated = { ...conv, personaId: personaId ?? undefined, updatedAt: now() }
     updateConversation(id, () => updated)
-    persist(updated)
+    if (!(await persist(updated))) return
     await window.sibyl.chat.invalidateSession(id)
     void actions.refreshContextUsage()
   },
@@ -842,7 +935,7 @@ export const actions = {
     const clean = uc && (uc.name.trim() || uc.description.trim()) ? uc : undefined
     const updated = { ...conv, userCharacter: clean, updatedAt: now() }
     updateConversation(id, () => updated)
-    persist(updated)
+    if (!(await persist(updated))) return
     await window.sibyl.chat.invalidateSession(id)
     void actions.refreshContextUsage()
   },
@@ -856,11 +949,16 @@ export const actions = {
 
   async deleteConversation(id: string): Promise<void> {
     if (state.scenePlay?.convId === id) actions.stopScenePlay()
-    await window.sibyl.conversations.delete(id)
+    const result = await window.sibyl.conversations.delete(id)
+    if (!result.ok) {
+      toast(result.error ?? 'Conversation could not be deleted.', 'error')
+      return
+    }
     setState((s) => {
       const conversations = s.conversations.filter((c) => c.id !== id)
       return {
         conversations,
+        unsavedConversationIds: s.unsavedConversationIds.filter((convId) => convId !== id),
         activeConversationId:
           s.activeConversationId === id ? (conversations[0]?.id ?? null) : s.activeConversationId
       }
@@ -937,21 +1035,39 @@ export const actions = {
       return saved
     })
     // Persist the user turn before generation so the engine can rebuild history.
-    if (saved) await window.sibyl.conversations.save(saved)
+    if (saved && !(await persist(saved))) return
 
+    setState({ streamStats: { messageId: assistantMsg.id, startedAt: Date.now(), tokens: 0 } })
     const res = await window.sibyl.chat.send({
       conversationId,
       message: content,
       assistantMessageId: assistantMsg.id
     })
-    if (!res.ok) toast(res.error ?? 'Failed to send message', 'error')
+    if (!res.ok) {
+      setState({ streamStats: null })
+      toast(res.error ?? 'Failed to send message', 'error')
+    }
   },
 
   abortGeneration(): void {
     // Stopping also halts scene autoplay so the aborted beat's 'done' doesn't
     // immediately schedule the next one.
     if (state.scenePlay) actions.stopScenePlay()
-    if (state.activeConversationId) void window.sibyl.chat.abort(state.activeConversationId)
+    const operation = state.engine.operation
+    const conversationId = state.activeConversationId
+    const messageId =
+      operation?.conversationId === conversationId
+        ? operation.messageId
+        : state.streamStats?.messageId
+    if (conversationId && messageId) {
+      const operationMatches =
+        operation?.conversationId === conversationId && operation.messageId === messageId
+      void window.sibyl.chat.abort({
+        conversationId,
+        messageId,
+        operationId: operationMatches ? operation.id : undefined
+      })
+    }
   },
 
   /** Remove a single message from the active conversation. */
@@ -999,7 +1115,7 @@ export const actions = {
         updatedAt: now()
       }
       updateConversation(conv.id, () => updated)
-      await window.sibyl.conversations.save(updated)
+      if (!(await persist(updated))) return
       await window.sibyl.chat.invalidateSession(conv.id)
       await actions.advanceScene(speakerId)
       return
@@ -1045,7 +1161,7 @@ export const actions = {
         updatedAt: now()
       }
       updateConversation(conv.id, () => updated)
-      await window.sibyl.conversations.save(updated)
+      if (!(await persist(updated))) return
       await window.sibyl.chat.invalidateSession(conv.id)
       await actions.advanceScene()
       return
@@ -1111,7 +1227,7 @@ export const actions = {
 
     const updated = { ...conv, overrides: next, updatedAt: now() }
     updateConversation(id, () => updated)
-    persist(updated)
+    if (!(await persist(updated))) return
     if (prevPrompt !== nextPrompt) await window.sibyl.chat.invalidateSession(id)
     void actions.refreshContextUsage()
   },
@@ -1140,15 +1256,48 @@ export const actions = {
   },
 
   async unloadModel(): Promise<void> {
-    await window.sibyl.engine.unload()
+    const res = await window.sibyl.engine.unload()
+    if (!res.ok) {
+      toast(res.error ?? 'Failed to unload model', 'error')
+      return
+    }
     setState({ contextUsage: null })
   },
 
   async deleteModel(id: string): Promise<void> {
     const model = state.installedModels.find((m) => m.id === id)
-    await window.sibyl.models.delete(id)
+    const res = await window.sibyl.models.delete(id)
+    if (!res.ok) {
+      toast(res.error ?? 'Model deletion was incomplete.', 'error')
+      await actions.refreshModels()
+      return
+    }
     await actions.refreshModels()
     toast(model?.local ? 'Model removed from library (file kept)' : 'Model deleted', 'info')
+  },
+
+  async locateModel(id: string): Promise<void> {
+    const res = await window.sibyl.models.locate(id)
+    if (!res.ok) {
+      toast(res.error ?? 'Could not update the model location.', 'error')
+      return
+    }
+    if (res.data) {
+      await actions.refreshModels()
+      toast('Model location updated', 'success')
+    }
+  },
+
+  async revealStorageRecovery(resource: StorageIssue['resource']): Promise<void> {
+    const res = await window.sibyl.app.revealRecovery(resource)
+    if (!res.ok) toast(res.error ?? 'Recovery copy is unavailable.', 'error')
+  },
+
+  async retryStorage(resource: StorageIssue['resource']): Promise<void> {
+    if (resource === 'models') await actions.refreshModels()
+    else await actions.refreshVoices()
+    const res = await window.sibyl.app.storageIssues()
+    if (res.ok) setState({ storageIssues: res.data ?? [] })
   },
 
   /** Pick a pre-downloaded .gguf from disk and register it (in place). */
@@ -1221,8 +1370,10 @@ export const actions = {
 
   // --- settings -----------------------------------------------------------
   async updateSettings(patch: RendererSettingsPatch): Promise<void> {
+    if (!(await flushPendingTextSettings())) return
     const res = await window.sibyl.settings.set(patch)
     if (res.ok && res.data) {
+      confirmedSettings = res.data
       setState({ settings: res.data })
       if (patch.theme) document.documentElement.classList.toggle('light', patch.theme === 'light')
       if (patch.accent) applyAccentTheme(patch.accent)
@@ -1230,6 +1381,28 @@ export const actions = {
     } else {
       toast(res.error ?? 'Failed to save settings', 'error')
     }
+  },
+
+  /** Optimistically coalesce textarea edits into one durable settings write. */
+  queueTextSettings(patch: RendererSettingsPatch): void {
+    if (!state.settings) return
+    pendingTextSettings = pendingTextSettings
+      ? {
+          ...pendingTextSettings,
+          ...patch,
+          generation: patch.generation ?? pendingTextSettings.generation,
+          load: patch.load ?? pendingTextSettings.load
+        }
+      : patch
+    setState({ settings: mergeSettingsPatch(state.settings, patch) })
+    if (settingsTextTimer) clearTimeout(settingsTextTimer)
+    settingsTextTimer = setTimeout(() => {
+      void flushPendingTextSettings()
+    }, 150)
+  },
+
+  async flushTextSettings(): Promise<void> {
+    await flushPendingTextSettings()
   },
 
   async setHfToken(token: string): Promise<boolean> {
@@ -1266,7 +1439,9 @@ export const actions = {
   },
 
   downloadVoice(voiceId: string): void {
-    void window.sibyl.tts.downloadVoice(voiceId)
+    void window.sibyl.tts.downloadVoice(voiceId).then((res) => {
+      if (!res.ok) toast(res.error ?? 'Voice download could not start.', 'error')
+    })
     toast('Downloading voice…', 'info')
   },
 
@@ -1276,7 +1451,11 @@ export const actions = {
 
   async deleteVoice(voiceId: string): Promise<void> {
     if (state.speakingMessageId) actions.stopSpeaking()
-    await window.sibyl.tts.deleteVoice(voiceId)
+    const result = await window.sibyl.tts.deleteVoice(voiceId)
+    if (!result.ok) {
+      toast(result.error ?? 'Voice could not be removed.', 'error')
+      return
+    }
     await actions.refreshVoices()
     // Clear the selection if we removed the active voice.
     if (state.settings?.tts.voiceId === voiceId) {

@@ -7,6 +7,7 @@ import type {
   Conversation,
   ContextUsage,
   EngineStatus,
+  EngineOperation,
   GenerationEvent,
   GenerationOptions,
   InstalledModel,
@@ -18,6 +19,7 @@ import { findPersona } from '@shared/personas'
 import { buildBeatPrompt, isScene, nextSpeakerId, sceneCast, type SceneTurn } from '@shared/scene'
 import { getLlamaInstance } from './llama'
 import { getInstalledModel, getSettings, upsertInstalledModel } from './store'
+import { SerialQueue } from '@shared/serial'
 
 /** Prefix the folded-history summary is injected under, inside the system turn. */
 const SUMMARY_PREFIX =
@@ -28,7 +30,7 @@ const SUMMARY_PREFIX =
  * a time (sized to the user's VRAM); switching conversations reuses the loaded
  * model and only rebuilds the chat session/KV-cache when necessary.
  */
-class InferenceEngine extends EventEmitter {
+export class InferenceEngine extends EventEmitter {
   private llama: NLC.Llama | null = null
   private model: NLC.LlamaModel | null = null
   private context: NLC.LlamaContext | null = null
@@ -42,16 +44,12 @@ class InferenceEngine extends EventEmitter {
   private state: EngineStatus['state'] = 'idle'
   private lastError: string | undefined
   private abort: AbortController | null = null
-  // True while a generate() or compact() is in flight. The engine holds a single
-  // chat session over one context sequence, so only one prompt may run at a time;
-  // this serializes (rejects) re-entrant calls instead of clobbering the abort
-  // controller and racing the shared KV cache.
-  private busy = false
-  // Resolves when the current exclusive operation has fully unwound. unload()
-  // awaits this (after aborting) so GPU resources are never disposed while a
-  // prompt is still running on a worker thread (that crashes with 0xC0000409).
-  private idle: Promise<void> = Promise.resolve()
-  private resolveIdle: (() => void) | null = null
+  private lifecycle = new SerialQueue()
+  private activeOperation: (EngineOperation & { controller?: AbortController }) | null = null
+  private operationSequence = 0
+  private loadRequestSequence = 0
+  private loadedConfiguration: string | null = null
+  private shutdownRequested = false
 
   // -- status ---------------------------------------------------------------
 
@@ -74,7 +72,16 @@ class InferenceEngine extends EventEmitter {
       vramTotalBytes: vramTotal,
       vramUsedBytes: vramUsed,
       contextSize: this.contextSize,
-      error: this.lastError
+      error: this.lastError,
+      operation: this.activeOperation
+        ? {
+            id: this.activeOperation.id,
+            kind: this.activeOperation.kind,
+            conversationId: this.activeOperation.conversationId,
+            messageId: this.activeOperation.messageId,
+            modelId: this.activeOperation.modelId
+          }
+        : undefined
     }
   }
 
@@ -84,83 +91,125 @@ class InferenceEngine extends EventEmitter {
     this.emit('status', await this.status())
   }
 
-  /** Mark the engine busy and arm the `idle` promise for unload() to await. */
-  private beginExclusive(): void {
-    this.busy = true
-    this.idle = new Promise<void>((resolve) => {
-      this.resolveIdle = resolve
-    })
+  private operation(
+    kind: EngineOperation['kind'],
+    details: Omit<EngineOperation, 'id' | 'kind'> = {},
+    controller?: AbortController
+  ): EngineOperation & { controller?: AbortController } {
+    return { id: `op-${++this.operationSequence}`, kind, ...details, controller }
   }
 
-  /** Clear busy and let any waiting unload() proceed. */
-  private endExclusive(): void {
-    this.busy = false
-    const resolve = this.resolveIdle
-    this.resolveIdle = null
-    resolve?.()
+  private clearOperation(operation: EngineOperation): void {
+    if (this.activeOperation?.id === operation.id) this.activeOperation = null
   }
 
   // -- model lifecycle ------------------------------------------------------
 
   async load(modelId: string): Promise<EngineStatus> {
-    if (this.loadedModelId === modelId && this.model) {
-      return this.status()
-    }
-    const installed = await getInstalledModel(modelId)
-    if (!installed) {
-      await this.setState('error', `Model not found: ${modelId}`)
-      throw new Error(`Model not found: ${modelId}`)
-    }
+    if (this.shutdownRequested) throw new Error('The inference engine is shutting down.')
+    const request = ++this.loadRequestSequence
+    // A model switch always interrupts a prompt before it enters the lifecycle
+    // queue, so teardown waits for the prompt to unwind rather than its full reply.
+    this.abort?.abort()
+    return this.lifecycle.run(async () => {
+      if (this.shutdownRequested) throw new Error('The inference engine is shutting down.')
+      const operation = this.operation('load', { modelId })
+      this.activeOperation = operation
+      await this.setState('loading')
 
-    await this.unload()
-    await this.setState('loading')
+      let model: NLC.LlamaModel | null = null
+      let context: NLC.LlamaContext | null = null
+      let sequence: NLC.LlamaContextSequence | null = null
+      try {
+        const [installed, settings] = await Promise.all([getInstalledModel(modelId), getSettings()])
+        if (!installed) throw new Error(`Model not found: ${modelId}`)
+        if (installed.availability && installed.availability !== 'available') {
+          throw new Error(installed.availabilityError ?? 'The model file is unavailable.')
+        }
+        const configuration = JSON.stringify({
+          path: installed.path,
+          gpu: settings.gpu,
+          gpuLayers: settings.load.gpuLayers,
+          contextSize: settings.load.contextSize,
+          systemPrompt: settings.load.systemPrompt
+        })
+        if (
+          this.loadedModelId === modelId &&
+          this.model &&
+          this.loadedConfiguration === configuration
+        ) {
+          this.clearOperation(operation)
+          await this.setState('ready')
+          return this.status()
+        }
 
-    try {
-      const settings = await getSettings()
-      this.llama = await getLlamaInstance(settings.gpu)
+        await this.disposeResources()
+        if (request !== this.loadRequestSequence) throw new Error('Model load was superseded.')
+        const llama = await getLlamaInstance(settings.gpu)
+        if (request !== this.loadRequestSequence) throw new Error('Model load was superseded.')
+        model = await llama.loadModel({
+          modelPath: installed.path,
+          gpuLayers: settings.load.gpuLayers < 0 ? undefined : settings.load.gpuLayers
+        })
+        if (request !== this.loadRequestSequence) throw new Error('Model load was superseded.')
 
-      this.model = await this.llama.loadModel({
-        modelPath: installed.path,
-        gpuLayers: settings.load.gpuLayers < 0 ? undefined : settings.load.gpuLayers
-      })
+        const trained = model.trainContextSize ?? settings.load.contextSize
+        const contextSize = Math.max(512, Math.min(settings.load.contextSize, trained))
+        context = await model.createContext({ contextSize, flashAttention: true })
+        if (request !== this.loadRequestSequence) throw new Error('Model load was superseded.')
+        sequence = context.getSequence()
+        const { LlamaChatSession } = await import('node-llama-cpp')
+        const session = new LlamaChatSession({
+          contextSequence: sequence,
+          systemPrompt: settings.load.systemPrompt
+        })
+        if (request !== this.loadRequestSequence) throw new Error('Model load was superseded.')
 
-      // Clamp the requested context to what the model was trained for.
-      const trained = this.model.trainContextSize ?? settings.load.contextSize
-      const requested = settings.load.contextSize
-      this.contextSize = Math.max(512, Math.min(requested, trained))
+        // Publish a complete resource set atomically. Until here the old shared
+        // fields are null, so stale completions cannot overwrite a newer load.
+        this.llama = llama
+        this.model = model
+        this.context = context
+        this.sequence = sequence
+        this.session = session
+        this.contextSize = contextSize
+        this.loadedModelId = modelId
+        this.loadedConfiguration = configuration
+        this.sessionConversationId = null
+        model = null
+        context = null
+        sequence = null
 
-      // Flash attention is required for models with per-layer KV head counts
-      // (e.g. Gemma 4's interleaved sliding-window attention); without it the
-      // CUDA backend falls back to a padded V-cache path and warns. It's also a
-      // throughput win on modern GPUs, so enable it for every model.
-      this.context = await this.model.createContext({
-        contextSize: this.contextSize,
-        flashAttention: true
-      })
-      // One persistent sequence + session is reused for every conversation; we
-      // swap context via setChatHistory rather than allocating new sequences
-      // (a context only exposes a small fixed pool of them).
-      const { LlamaChatSession } = await import('node-llama-cpp')
-      this.sequence = this.context.getSequence()
-      this.session = new LlamaChatSession({
-        contextSequence: this.sequence,
-        systemPrompt: settings.load.systemPrompt
-      })
-      this.loadedModelId = modelId
-      this.sessionConversationId = null
-
-      // Enrich the registry with metadata learned at load time.
-      await this.persistMetadata(installed)
-
-      await this.setState('ready')
-      void this.emitUsage(null)
-      return this.status()
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      await this.unload()
-      await this.setState('error', msg)
-      throw err
-    }
+        await this.persistMetadata(installed)
+        this.clearOperation(operation)
+        await this.setState('ready')
+        void this.emitUsage(null)
+        return this.status()
+      } catch (err) {
+        try {
+          sequence?.dispose()
+        } catch {
+          /* best-effort cleanup of an unpublished load */
+        }
+        try {
+          if (context) await context.dispose()
+        } catch {
+          /* best-effort cleanup of an unpublished load */
+        }
+        try {
+          if (model) await model.dispose()
+        } catch {
+          /* best-effort cleanup of an unpublished load */
+        }
+        if (request === this.loadRequestSequence && !this.shutdownRequested) {
+          this.clearOperation(operation)
+          await this.setState('error', err instanceof Error ? err.message : String(err))
+        }
+        throw err
+      } finally {
+        this.clearOperation(operation)
+      }
+    })
   }
 
   private async persistMetadata(installed: InstalledModel): Promise<void> {
@@ -177,38 +226,68 @@ class InferenceEngine extends EventEmitter {
   }
 
   async unload(): Promise<void> {
-    // Abort any in-flight generation/compaction and WAIT for it to fully unwind
-    // before disposing GPU resources. Disposing the context/model while a prompt
-    // is still running on a libuv worker is a use-after-free that crashes the
-    // process with 0xC0000409.
+    ++this.loadRequestSequence
     this.abort?.abort()
-    if (this.busy) {
+    await this.lifecycle.run(async () => {
+      const operation = this.operation('unload')
+      this.activeOperation = operation
+      await this.setState('unloading')
       try {
-        await this.idle
-      } catch {
-        /* the operation reports its own errors; we only need it to have stopped */
+        await this.disposeResources()
+        this.clearOperation(operation)
+        if (!this.shutdownRequested) await this.setState('idle')
+      } finally {
+        this.clearOperation(operation)
       }
-    }
+    })
+  }
+
+  private async disposeResources(): Promise<void> {
     this.abort = null
-    try {
-      this.session = null
-      if (this.sequence) this.sequence.dispose()
-      if (this.context) await this.context.dispose()
-    } catch {
-      /* ignore */
-    }
-    try {
-      if (this.model) await this.model.dispose()
-    } catch {
-      /* ignore */
-    }
+    this.session = null
+    const sequence = this.sequence
+    const context = this.context
+    const model = this.model
     this.sequence = null
     this.context = null
     this.model = null
     this.loadedModelId = null
+    this.loadedConfiguration = null
     this.sessionConversationId = null
     this.contextSize = null
-    if (this.state !== 'error') await this.setState('idle')
+    try {
+      sequence?.dispose()
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (context) await context.dispose()
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (model) await model.dispose()
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    this.shutdownRequested = true
+    ++this.loadRequestSequence
+    this.abort?.abort()
+    await this.lifecycle.run(async () => {
+      const operation = this.operation('shutdown')
+      this.activeOperation = operation
+      await this.setState('shutting-down')
+      try {
+        await this.disposeResources()
+        this.clearOperation(operation)
+        await this.setState('shutting-down')
+      } finally {
+        this.clearOperation(operation)
+      }
+    })
   }
 
   // -- chat session ---------------------------------------------------------
@@ -350,9 +429,7 @@ class InferenceEngine extends EventEmitter {
       return
     }
 
-    // One generation/compaction at a time — see `busy`. The renderer already
-    // disables sending while generating; this is the backstop against a race.
-    if (this.busy) {
+    if (this.activeOperation) {
       this.emitEvent({
         type: 'error',
         conversationId: conversation.id,
@@ -361,7 +438,15 @@ class InferenceEngine extends EventEmitter {
       })
       return
     }
-    this.beginExclusive()
+    const controller = new AbortController()
+    const operation = this.operation(
+      'generate',
+      { conversationId: conversation.id, messageId: assistantMessageId },
+      controller
+    )
+    this.activeOperation = operation
+    this.abort = controller
+    return this.lifecycle.run(async () => {
 
     let started = 0
     let completionTokens = 0
@@ -370,12 +455,12 @@ class InferenceEngine extends EventEmitter {
       const settings = await getSettings()
       const opts = this.generationFor(conversation, settings, optionsOverride)
       const session = await this.ensureSession(conversation, userText)
-      this.abort = new AbortController()
       await this.setState('generating')
+      if (controller.signal.aborted) throw new Error('Generation aborted.')
 
       started = Date.now()
       const responseText = await session.prompt(userText, {
-        signal: this.abort.signal,
+        signal: controller.signal,
         stopOnAbortSignal: true,
         temperature: opts.temperature,
         topP: opts.topP,
@@ -407,7 +492,7 @@ class InferenceEngine extends EventEmitter {
       }
       const promptTokens = this.estimatePromptTokens(conversation, userText)
       this.emitEvent({
-        type: 'done',
+        type: controller.signal.aborted ? 'aborted' : 'done',
         conversationId: conversation.id,
         messageId: assistantMessageId,
         stats: {
@@ -419,11 +504,10 @@ class InferenceEngine extends EventEmitter {
         }
       })
     } catch (err) {
-      if (this.abort?.signal.aborted) {
-        // Treat user-initiated stop as a graceful completion of partial text.
+      if (controller.signal.aborted) {
         const durationMs = Date.now() - started
         this.emitEvent({
-          type: 'done',
+          type: 'aborted',
           conversationId: conversation.id,
           messageId: assistantMessageId,
           stats: {
@@ -443,13 +527,13 @@ class InferenceEngine extends EventEmitter {
         })
       }
     } finally {
-      this.abort = null
-      await this.setState('ready')
+      if (this.abort === controller) this.abort = null
+      this.clearOperation(operation)
+      if (!this.shutdownRequested) await this.setState(this.model ? 'ready' : 'idle')
       // Report the now-exact KV-cache fill so the renderer's meter is accurate.
       void this.emitUsage(conversation)
-      // Release last: unblocks any unload() waiting for this prompt to unwind.
-      this.endExclusive()
     }
+    })
   }
 
   /** Map the neutral scene history (+ system) onto node-llama-cpp chat items. */
@@ -485,7 +569,7 @@ class InferenceEngine extends EventEmitter {
       })
       return
     }
-    if (this.busy) {
+    if (this.activeOperation) {
       this.emitEvent({
         type: 'error',
         conversationId: conversation.id,
@@ -494,13 +578,17 @@ class InferenceEngine extends EventEmitter {
       })
       return
     }
+    const session = this.session
 
-    // Latch synchronously — BEFORE any await — so two near-simultaneous advances
-    // can't both pass the busy check above and then run concurrent prompts on the
-    // one shared context sequence (that corrupts the KV cache / crashes the GPU
-    // worker). generate() latches the same way; resolution moves inside the try so
-    // every exit path releases via finally.
-    this.beginExclusive()
+    const controller = new AbortController()
+    const operation = this.operation(
+      'scene-beat',
+      { conversationId: conversation.id, messageId: assistantMessageId },
+      controller
+    )
+    this.activeOperation = operation
+    this.abort = controller
+    return this.lifecycle.run(async () => {
     let started = 0
     let completionTokens = 0
     try {
@@ -531,16 +619,16 @@ class InferenceEngine extends EventEmitter {
       if (summary) system += `\n\n${SUMMARY_PREFIX}${summary}`
 
       // The speaker changes every beat — always rebuild the session history.
-      this.session.setChatHistory(this.sceneHistory(system, beat.history))
+      session.setChatHistory(this.sceneHistory(system, beat.history))
       this.sessionConversationId = null
 
       const stopTriggers = [...(opts.stopSequences ?? []), ...beat.stopTriggers].filter(Boolean)
-      this.abort = new AbortController()
       await this.setState('generating')
+      if (controller.signal.aborted) throw new Error('Generation aborted.')
 
       started = Date.now()
-      const responseText = await this.session.prompt(beat.prompt, {
-        signal: this.abort.signal,
+      const responseText = await session.prompt(beat.prompt, {
+        signal: controller.signal,
         stopOnAbortSignal: true,
         temperature: opts.temperature,
         topP: opts.topP,
@@ -568,7 +656,7 @@ class InferenceEngine extends EventEmitter {
         /* keep chunk-based estimate */
       }
       this.emitEvent({
-        type: 'done',
+        type: controller.signal.aborted ? 'aborted' : 'done',
         conversationId: conversation.id,
         messageId: assistantMessageId,
         stats: {
@@ -582,10 +670,10 @@ class InferenceEngine extends EventEmitter {
         }
       })
     } catch (err) {
-      if (this.abort?.signal.aborted) {
+      if (controller.signal.aborted) {
         const durationMs = Date.now() - started
         this.emitEvent({
-          type: 'done',
+          type: 'aborted',
           conversationId: conversation.id,
           messageId: assistantMessageId,
           stats: {
@@ -605,13 +693,14 @@ class InferenceEngine extends EventEmitter {
         })
       }
     } finally {
-      this.abort = null
+      if (this.abort === controller) this.abort = null
       // The session no longer matches any single conversation's history.
       this.sessionConversationId = null
-      await this.setState('ready')
+      this.clearOperation(operation)
+      if (!this.shutdownRequested) await this.setState(this.model ? 'ready' : 'idle')
       void this.emitUsage(conversation)
-      this.endExclusive()
     }
+    })
   }
 
   private estimatePromptTokens(conversation: Conversation, userText: string): number {
@@ -624,8 +713,22 @@ class InferenceEngine extends EventEmitter {
     }
   }
 
-  abortGeneration(): void {
-    this.abort?.abort()
+  abortGeneration(request: {
+    conversationId: string
+    messageId: string
+    operationId?: string
+  }): boolean {
+    const operation = this.activeOperation
+    if (
+      !operation?.controller ||
+      operation.conversationId !== request.conversationId ||
+      operation.messageId !== request.messageId ||
+      (request.operationId !== undefined && operation.id !== request.operationId)
+    ) {
+      return false
+    }
+    operation.controller.abort()
+    return true
   }
 
   /**
@@ -740,9 +843,13 @@ class InferenceEngine extends EventEmitter {
    */
   async compact(conversation: Conversation): Promise<CompactionInfo> {
     if (!this.session || !this.model) throw new Error('No model is loaded.')
-    // Shares the single chat session with generate(); refuse to run concurrently.
-    if (this.busy) throw new Error('Cannot compact while another operation is in progress.')
-    this.beginExclusive()
+    const session = this.session
+    if (this.activeOperation) throw new Error('Cannot compact while another operation is in progress.')
+    const controller = new AbortController()
+    const operation = this.operation('compact', { conversationId: conversation.id }, controller)
+    this.activeOperation = operation
+    this.abort = controller
+    return this.lifecycle.run(async () => {
     try {
       const settings = await getSettings()
       const maxKeep = Math.max(0, settings.context.keepRecentMessages)
@@ -792,30 +899,30 @@ class InferenceEngine extends EventEmitter {
       // the next generate rebuilds from it). On cancel/failure we restore the
       // conversation so the clobbered history doesn't bleed into the next turn — and
       // a half-generated summary is discarded rather than persisted.
-      this.abort = new AbortController()
       await this.setState('generating')
       let summary = ''
       try {
-        this.session.setChatHistory([
+        session.setChatHistory([
           { type: 'system', text: 'You are a precise conversation summarizer.' }
         ])
-        const out = await this.session.prompt(instruction, {
-          signal: this.abort.signal,
+        const out = await session.prompt(instruction, {
+          signal: controller.signal,
           stopOnAbortSignal: true,
           temperature: 0.3,
           // Scale the summary budget to the window so a large context isn't
           // stuck with a tiny (fixed-600) summary that loses detail every pass.
           maxTokens: summaryBudgetTokens(contextSize, settings.context.summaryTokenFraction)
         })
-        if (this.abort.signal.aborted) throw new Error('Compaction cancelled.')
+        if (controller.signal.aborted) throw new Error('Compaction cancelled.')
         summary = out.trim()
         if (!summary) throw new Error('Summarization produced no output.')
       } catch (err) {
         await this.restoreSession(conversation)
         throw err
       } finally {
-        this.abort = null
-        await this.setState('ready')
+        if (this.abort === controller) this.abort = null
+        this.clearOperation(operation)
+        if (!this.shutdownRequested) await this.setState(this.model ? 'ready' : 'idle')
       }
 
       // Success: invalidate so the next generate rebuilds from the compacted history.
@@ -831,8 +938,9 @@ class InferenceEngine extends EventEmitter {
         compactedAt: new Date().toISOString()
       }
     } finally {
-      this.endExclusive()
+      this.clearOperation(operation)
     }
+    })
   }
 
   private emitEvent(event: GenerationEvent): void {

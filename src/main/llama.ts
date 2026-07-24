@@ -11,7 +11,11 @@ let modPromise: Promise<NLCModule> | null = null
 
 export function nlc(): Promise<NLCModule> {
   if (!modPromise) {
-    modPromise = import('node-llama-cpp')
+    const request = import('node-llama-cpp')
+    modPromise = request
+    void request.catch(() => {
+      if (modPromise === request) modPromise = null
+    })
   }
   return modPromise
 }
@@ -95,8 +99,17 @@ export async function getLlamaInstance(gpu: AppSettings['gpu']): Promise<NLC.Lla
     llamaPromise = null
   }
   llamaGpu = gpu
-  llamaPromise = createLlama(gpu)
-  return llamaPromise
+  const request = createLlama(gpu)
+  llamaPromise = request
+  void request.catch(() => {
+    // Clear only the request that failed; a newer backend request may already
+    // have replaced it and must remain cached.
+    if (llamaPromise === request) {
+      llamaPromise = null
+      llamaGpu = null
+    }
+  })
+  return request
 }
 
 export async function disposeLlama(): Promise<void> {

@@ -15,7 +15,7 @@ import type {
   SystemPromptPreset,
   UserCharacter
 } from './types'
-import type { ChatAdvanceRequest, ChatSendRequest, TtsSpeakRequest } from './ipc'
+import type { ChatAbortRequest, ChatAdvanceRequest, ChatSendRequest, TtsSpeakRequest } from './ipc'
 import type { TtsSettings } from './tts'
 import { ACCENT_THEMES } from './themes'
 
@@ -225,7 +225,7 @@ function parseStats(value: unknown, path: string): ChatMessage['stats'] {
 
 function parseMessage(value: unknown, path: string): ChatMessage {
   const v = object(value, path)
-  keys(v, ['id', 'role', 'content', 'createdAt', 'stats', 'error', 'speakerId', 'speakerName', 'director'], path)
+  keys(v, ['id', 'role', 'content', 'createdAt', 'stats', 'error', 'stopped', 'speakerId', 'speakerName', 'director'], path)
   if (v.role !== 'system' && v.role !== 'user' && v.role !== 'assistant') {
     invalid(`${path}.role`, 'unsupported role')
   }
@@ -236,6 +236,7 @@ function parseMessage(value: unknown, path: string): ChatMessage {
     createdAt: string(v.createdAt, `${path}.createdAt`, 64, false),
     stats: optional(v.stats, (x) => parseStats(x, `${path}.stats`)),
     error: optional(v.error, (x) => string(x, `${path}.error`, 2_000)),
+    stopped: optional(v.stopped, (x) => bool(x, `${path}.stopped`)),
     speakerId: optional(v.speakerId, (x) => parseCanonicalId(x, `${path}.speakerId`)),
     speakerName: optional(v.speakerName, (x) => string(x, `${path}.speakerName`, 200, false)),
     director: optional(v.director, (x) => bool(x, `${path}.director`))
@@ -364,6 +365,17 @@ export function parseChatSendRequest(value: unknown): ChatSendRequest {
 
 export function parseChatAdvanceRequest(value: unknown): ChatAdvanceRequest {
   return parseChatBase(value, true) as ChatAdvanceRequest
+}
+
+export function parseChatAbortRequest(value: unknown): ChatAbortRequest {
+  const path = 'chatAbort'
+  const v = object(value, path)
+  keys(v, ['conversationId', 'messageId', 'operationId'], path)
+  return {
+    conversationId: parseCanonicalId(v.conversationId, `${path}.conversationId`),
+    messageId: parseCanonicalId(v.messageId, `${path}.messageId`),
+    operationId: optional(v.operationId, (x) => parseCanonicalId(x, `${path}.operationId`))
+  }
 }
 
 /** Ensure generation targets the exact persisted turn the renderer committed. */

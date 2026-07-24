@@ -6,11 +6,34 @@ import type { DownloadProgress, InstalledModel } from '@shared/types'
 import { formatBytes, modelIdFor, parseParamLabel, parseQuant } from '@shared/format'
 import { getRepoGgufFiles, type RepoFileInfo } from './hf'
 import { nlc } from './llama'
-import { getModelsDir, getSettings, upsertInstalledModel } from './store'
+import {
+  getInstalledModel,
+  getModelsDir,
+  getSettings,
+  removeInstalledModel,
+  upsertInstalledModel
+} from './store'
 
 /** Escape a string for safe interpolation into a RegExp. */
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** Resolve one GGUF path to its exact multipart shard group, if applicable. */
+export async function resolveModelShardFiles(finalPath: string): Promise<string[]> {
+  const base = path.basename(finalPath)
+  const dir = path.dirname(finalPath)
+  const match = base.match(/^(.*)-\d{5}-of-(\d{5})\.gguf$/i)
+  if (!match) return [finalPath]
+  const re = new RegExp(`^${escapeRegExp(match[1])}-\\d{5}-of-${match[2]}\\.gguf$`, 'i')
+  try {
+    const shards = (await fs.readdir(dir))
+      .filter((file) => re.test(file))
+      .map((file) => path.join(dir, file))
+    return shards.length ? shards : [finalPath]
+  } catch {
+    return [finalPath]
+  }
 }
 
 /**
@@ -67,7 +90,7 @@ interface ActiveDownload {
  * downloader (which handles multi-part GGUFs and resume), while exposing
  * smoothed progress + cancellation and registering finished models.
  */
-class DownloadManager extends EventEmitter {
+export class DownloadManager extends EventEmitter {
   private active = new Map<string, ActiveDownload>()
 
   list(): DownloadProgress[] {
@@ -82,8 +105,6 @@ class DownloadManager extends EventEmitter {
     const id = modelIdFor(repoId, filename)
     if (this.active.has(id)) return { id }
 
-    const modelsDir = await getModelsDir()
-    const settings = await getSettings()
     const controller = new AbortController()
 
     const entry: ActiveDownload = {
@@ -98,7 +119,7 @@ class DownloadManager extends EventEmitter {
         etaSeconds: null
       },
       controller,
-      verifyChecksum: settings.verifyDownloads,
+      verifyChecksum: true,
       lastBytes: 0,
       lastTime: Date.now(),
       smoothedSpeed: 0
@@ -107,24 +128,32 @@ class DownloadManager extends EventEmitter {
     this.emitProgress(entry)
 
     // Kick off asynchronously; callers get the id immediately.
-    void this.run(entry, repoId, filename, modelsDir, settings.hfToken)
+    void this.run(entry, repoId, filename).catch((err) => {
+      // `run` is defensive and normally consumes failures. This terminal catch
+      // guarantees a future refactor cannot create an unhandled rejection.
+      entry.progress.status = 'error'
+      entry.progress.error = err instanceof Error ? err.message : String(err)
+      this.emitProgress(entry)
+      this.active.delete(id)
+    })
     return { id }
   }
 
   private async run(
     entry: ActiveDownload,
     repoId: string,
-    filename: string,
-    modelsDir: string,
-    hfToken: string | null
+    filename: string
   ): Promise<void> {
-    const { createModelDownloader } = await nlc()
-    // Repo file info (sizes + LFS checksums) for this download, fetched once and
-    // concurrently. Drives the disk-space pre-flight and checksum verification.
-    // Never rejects — an empty map just disables both checks.
-    const fileInfoPromise = getRepoGgufFiles(repoId)
     try {
-      const fileInfo = await fileInfoPromise
+      // Keep every asynchronous setup step inside this handler so native import,
+      // settings, metadata, and directory failures all reach a terminal state.
+      const [{ createModelDownloader }, modelsDir, settings, fileInfo] = await Promise.all([
+        nlc(),
+        getModelsDir(),
+        getSettings(),
+        getRepoGgufFiles(repoId)
+      ])
+      entry.verifyChecksum = settings.verifyDownloads
       // Pre-flight: refuse before writing anything if the volume lacks room, so the
       // user gets a clear message instead of an ENOSPC failure partway through.
       await this.ensureDiskSpace(modelsDir, fileInfo, filename)
@@ -135,7 +164,7 @@ class DownloadManager extends EventEmitter {
       const downloader = await createModelDownloader({
         modelUri: `hf:${repoId}/${filename}`,
         dirPath: modelsDir,
-        headers: hfToken ? { Authorization: `Bearer ${hfToken}` } : undefined,
+        headers: settings.hfToken ? { Authorization: `Bearer ${settings.hfToken}` } : undefined,
         showCliProgress: false,
         deleteTempFileOnCancel: false, // keep partial data so resume works
         onProgress: ({ totalSize, downloadedSize }) => {
@@ -366,17 +395,7 @@ class DownloadManager extends EventEmitter {
    * multi-part GGUF — every shard sharing its `-NNNNN-of-MMMMM` group.
    */
   private async shardFilesFor(finalPath: string): Promise<string[]> {
-    const base = path.basename(finalPath)
-    const dir = path.dirname(finalPath)
-    const m = base.match(/^(.*)-\d{5}-of-(\d{5})\.gguf$/i)
-    if (!m) return [finalPath]
-    const re = new RegExp(`^${escapeRegExp(m[1])}-\\d{5}-of-${m[2]}\\.gguf$`, 'i')
-    try {
-      const shards = (await fs.readdir(dir)).filter((f) => re.test(f)).map((f) => path.join(dir, f))
-      return shards.length ? shards : [finalPath]
-    } catch {
-      return [finalPath]
-    }
+    return resolveModelShardFiles(finalPath)
   }
 
   /** Total size of a model's file(s) on disk; 0 if none can be stat'd. */
@@ -407,6 +426,39 @@ class DownloadManager extends EventEmitter {
 }
 
 export const downloadManager = new DownloadManager()
+
+/**
+ * Remove a library entry and, only for Sibyl-owned downloads, every file in its
+ * exact shard group. Partial filesystem failures are reported and the registry
+ * entry is retained so the user can retry.
+ */
+export async function deleteInstalledModel(id: string): Promise<void> {
+  const model = await getInstalledModel(id)
+  if (!model) return
+  if (model.local) {
+    await removeInstalledModel(id)
+    return
+  }
+
+  const modelsDir = path.resolve(await getModelsDir())
+  const failures: string[] = []
+  for (const file of await resolveModelShardFiles(model.path)) {
+    const relative = path.relative(modelsDir, path.resolve(file))
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+      failures.push(`${path.basename(file)}: path is outside Sibyl's models directory`)
+      continue
+    }
+    try {
+      await fs.rm(file, { force: true })
+    } catch (err) {
+      failures.push(`${path.basename(file)}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  if (failures.length) {
+    throw new Error(`Could not delete every model shard. ${failures.join('; ')}`)
+  }
+  await removeInstalledModel(id)
+}
 
 /** Re-scan the models directory for GGUF files not yet in the registry. */
 export async function importExistingModels(): Promise<void> {

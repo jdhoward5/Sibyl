@@ -1,6 +1,5 @@
 import { app, safeStorage } from 'electron'
 import { promises as fs } from 'node:fs'
-import { existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { parseParamLabel, parseQuant } from '@shared/format'
@@ -10,6 +9,8 @@ import type {
   InstalledModel,
   Persona,
   RendererSettings,
+  ResourceAvailability,
+  StorageIssue,
   SystemPromptPreset
 } from '@shared/types'
 import {
@@ -21,6 +22,7 @@ import { DEFAULT_TTS_SETTINGS, type InstalledVoice } from '@shared/tts'
 import { DEFAULT_ACCENT } from '@shared/themes'
 import { DEFAULT_PERSONAS, gradientFor, initialsOf } from '@shared/personas'
 import { parseCanonicalId, parseConversation } from '@shared/validation'
+import { SerialQueue } from '@shared/serial'
 
 /** Deep-ish clone so callers can't mutate the shared default persona objects. */
 function clonePersona(p: Persona): Persona {
@@ -91,6 +93,20 @@ async function atomicWrite(filePath: string, data: string): Promise<void> {
     await fs.rm(tmp, { force: true }).catch(() => {})
     throw err
   }
+}
+
+const settingsQueue = new SerialQueue()
+const modelRegistryQueue = new SerialQueue()
+const voiceRegistryQueue = new SerialQueue()
+const conversationQueues = new Map<string, SerialQueue>()
+
+function conversationQueue(id: string): SerialQueue {
+  let queue = conversationQueues.get(id)
+  if (!queue) {
+    queue = new SerialQueue()
+    conversationQueues.set(id, queue)
+  }
+  return queue
 }
 
 async function readJSON<T>(filePath: string, fallback: T): Promise<T> {
@@ -170,7 +186,7 @@ function decryptToken(enc: string | null): string | null {
 
 let cachedSettings: AppSettings | null = null
 
-export async function getSettings(): Promise<AppSettings> {
+async function loadSettingsUnlocked(): Promise<AppSettings> {
   if (cachedSettings) return cachedSettings
   const persisted = await readJSON<PersistedSettings | null>(settingsPath(), null)
   const base = defaultSettings()
@@ -201,52 +217,57 @@ export async function getSettings(): Promise<AppSettings> {
   return cachedSettings
 }
 
+export async function getSettings(): Promise<AppSettings> {
+  if (cachedSettings) return cachedSettings
+  return settingsQueue.run(loadSettingsUnlocked)
+}
+
 export async function setSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
-  const current = await getSettings()
-  const next: AppSettings = {
-    ...current,
-    ...patch,
-    generation: { ...current.generation, ...(patch.generation ?? {}) },
-    load: { ...current.load, ...(patch.load ?? {}) },
-    context: { ...current.context, ...(patch.context ?? {}) },
-    tts: { ...current.tts, ...(patch.tts ?? {}) },
-    telemetry: false
-  }
+  return settingsQueue.run(async () => {
+    const current = await loadSettingsUnlocked()
+    const next: AppSettings = {
+      ...current,
+      ...patch,
+      generation: { ...current.generation, ...(patch.generation ?? {}) },
+      load: { ...current.load, ...(patch.load ?? {}) },
+      context: { ...current.context, ...(patch.context ?? {}) },
+      tts: { ...current.tts, ...(patch.tts ?? {}) },
+      telemetry: false
+    }
 
-  // Encrypt the token for persistence. If a non-null token can't be encrypted
-  // (OS secure storage unavailable / keychain error), don't silently drop it:
-  // clear it so memory and disk agree, then report the failure to the caller.
-  const hfTokenEnc = encryptToken(next.hfToken)
-  const tokenStoreFailed = next.hfToken != null && hfTokenEnc == null
-  if (tokenStoreFailed) next.hfToken = null
+    // Encrypt the token for persistence. If a non-null token can't be encrypted
+    // (OS secure storage unavailable / keychain error), don't silently drop it.
+    const hfTokenEnc = encryptToken(next.hfToken)
+    const tokenStoreFailed = next.hfToken != null && hfTokenEnc == null
+    if (tokenStoreFailed) {
+      throw new Error(
+        'Could not store your Hugging Face token securely: this system’s secure ' +
+          'storage (OS keychain) is unavailable, so the token was not saved.'
+      )
+    }
 
-  cachedSettings = next
+    const persisted: PersistedSettings = {
+      modelsDir: next.modelsDir,
+      generation: next.generation,
+      load: next.load,
+      context: next.context,
+      theme: next.theme,
+      accent: next.accent,
+      gpu: next.gpu,
+      verifyDownloads: next.verifyDownloads,
+      personas: next.personas,
+      promptPresets: next.promptPresets,
+      generationProfiles: next.generationProfiles,
+      tts: next.tts,
+      telemetry: false,
+      hfTokenEnc
+    }
+    await atomicWrite(settingsPath(), JSON.stringify(persisted, null, 2))
 
-  const persisted: PersistedSettings = {
-    modelsDir: next.modelsDir,
-    generation: next.generation,
-    load: next.load,
-    context: next.context,
-    theme: next.theme,
-    accent: next.accent,
-    gpu: next.gpu,
-    verifyDownloads: next.verifyDownloads,
-    personas: next.personas,
-    promptPresets: next.promptPresets,
-    generationProfiles: next.generationProfiles,
-    tts: next.tts,
-    telemetry: false,
-    hfTokenEnc
-  }
-  await atomicWrite(settingsPath(), JSON.stringify(persisted, null, 2))
-
-  if (tokenStoreFailed) {
-    throw new Error(
-      'Could not store your Hugging Face token securely: this system’s secure ' +
-        'storage (OS keychain) is unavailable, so the token was not saved.'
-    )
-  }
-  return next
+    // Only expose the new snapshot after the rename has durably succeeded.
+    cachedSettings = next
+    return next
+  })
 }
 
 /** Strip the decrypted secret before settings cross into renderer memory. */
@@ -265,30 +286,199 @@ export async function getModelsDir(): Promise<string> {
 // Installed model registry
 // ---------------------------------------------------------------------------
 
-export async function listInstalledModels(): Promise<InstalledModel[]> {
-  const models = await readJSON<InstalledModel[]>(registryPath(), [])
-  // Drop entries whose files no longer exist on disk.
-  const alive = models.filter((m) => existsSync(m.path))
-  if (alive.length !== models.length) {
-    await atomicWrite(registryPath(), JSON.stringify(alive, null, 2))
+let modelRegistry: InstalledModel[] | null = null
+let voiceRegistry: InstalledVoice[] | null = null
+const storageIssues = new Map<StorageIssue['resource'], StorageIssue>()
+const recoveryPaths = new Map<StorageIssue['resource'], string>()
+
+function errorCode(err: unknown): string | undefined {
+  return typeof err === 'object' && err !== null && 'code' in err
+    ? String((err as { code?: unknown }).code)
+    : undefined
+}
+
+async function latestRecoveryCopy(filePath: string): Promise<string | null> {
+  const prefix = `${path.basename(filePath)}.corrupt-`
+  try {
+    const matches = (await fs.readdir(path.dirname(filePath)))
+      .filter((name) => name.startsWith(prefix))
+      .sort()
+    return matches.length ? path.join(path.dirname(filePath), matches[matches.length - 1]) : null
+  } catch {
+    return null
   }
-  return alive
+}
+
+async function readRegistry<T>(
+  resource: StorageIssue['resource'],
+  filePath: string,
+  validate: (value: unknown) => value is T[]
+): Promise<T[]> {
+  let raw: string
+  try {
+    raw = await fs.readFile(filePath, 'utf8')
+  } catch (err) {
+    if (errorCode(err) === 'ENOENT') {
+      const recovery = await latestRecoveryCopy(filePath)
+      if (recovery) {
+        storageIssues.set(resource, {
+          resource,
+          kind: 'malformed',
+          message: `The ${resource} registry was malformed. Sibyl preserved it as a recovery copy.`,
+          recoverable: true
+        })
+        recoveryPaths.set(resource, recovery)
+      }
+      return []
+    }
+    storageIssues.set(resource, {
+      resource,
+      kind: 'unreadable',
+      message: `The ${resource} registry cannot be read. Existing entries were kept in memory.`,
+      recoverable: false
+    })
+    throw err
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!validate(parsed)) throw new Error('Registry schema is invalid')
+    storageIssues.delete(resource)
+    recoveryPaths.delete(resource)
+    return parsed
+  } catch {
+    const backup = `${filePath}.corrupt-${Date.now()}`
+    try {
+      await fs.rename(filePath, backup)
+    } catch (err) {
+      storageIssues.set(resource, {
+        resource,
+        kind: 'unreadable',
+        message: `The ${resource} registry is malformed but could not be quarantined. Restore permissions and retry.`,
+        recoverable: false
+      })
+      throw err
+    }
+    storageIssues.set(resource, {
+      resource,
+      kind: 'malformed',
+      message: `The ${resource} registry was malformed. Sibyl preserved it as a recovery copy.`,
+      recoverable: true
+    })
+    recoveryPaths.set(resource, backup)
+    return []
+  }
+}
+
+function isModelArray(value: unknown): value is InstalledModel[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (entry) =>
+        entry !== null &&
+        typeof entry === 'object' &&
+        typeof (entry as InstalledModel).id === 'string' &&
+        typeof (entry as InstalledModel).path === 'string'
+    )
+  )
+}
+
+function isVoiceArray(value: unknown): value is InstalledVoice[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (entry) =>
+        entry !== null &&
+        typeof entry === 'object' &&
+        typeof (entry as InstalledVoice).id === 'string' &&
+        typeof (entry as InstalledVoice).modelPath === 'string' &&
+        typeof (entry as InstalledVoice).configPath === 'string'
+    )
+  )
+}
+
+function durableModel(model: InstalledModel): InstalledModel {
+  const { availability: _availability, availabilityError: _error, ...saved } = model
+  return saved
+}
+
+function durableVoice(voice: InstalledVoice): InstalledVoice {
+  const { availability: _availability, availabilityError: _error, ...saved } = voice
+  return saved
+}
+
+async function fileAvailability(filePath: string): Promise<{
+  availability: ResourceAvailability
+  availabilityError?: string
+}> {
+  try {
+    const stat = await fs.stat(filePath)
+    if (stat.isFile()) return { availability: 'available' }
+    return { availability: 'missing', availabilityError: 'The registered path is not a file.' }
+  } catch (err) {
+    const code = errorCode(err)
+    if (code === 'EACCES' || code === 'EPERM') {
+      return { availability: 'unreadable', availabilityError: 'The file is not readable.' }
+    }
+    if (code === 'ENOENT') {
+      try {
+        await fs.access(path.dirname(filePath))
+        return { availability: 'missing', availabilityError: 'The file is missing.' }
+      } catch {
+        return {
+          availability: 'unavailable',
+          availabilityError: 'The containing drive or folder is unavailable.'
+        }
+      }
+    }
+    return { availability: 'unavailable', availabilityError: 'The file is temporarily unavailable.' }
+  }
+}
+
+async function loadModelsUnlocked(): Promise<InstalledModel[]> {
+  if (modelRegistry && storageIssues.get('models')?.kind !== 'unreadable') return modelRegistry
+  try {
+    modelRegistry = await readRegistry('models', registryPath(), isModelArray)
+  } catch {
+    return modelRegistry ?? []
+  }
+  return modelRegistry
+}
+
+export async function listInstalledModels(): Promise<InstalledModel[]> {
+  return modelRegistryQueue.run(async () => {
+    const models = await loadModelsUnlocked()
+    return Promise.all(models.map(async (model) => ({ ...model, ...(await fileAvailability(model.path)) })))
+  })
 }
 
 export async function upsertInstalledModel(model: InstalledModel): Promise<void> {
-  const models = await readJSON<InstalledModel[]>(registryPath(), [])
-  const idx = models.findIndex((m) => m.id === model.id)
-  if (idx >= 0) models[idx] = model
-  else models.push(model)
-  await atomicWrite(registryPath(), JSON.stringify(models, null, 2))
+  await modelRegistryQueue.run(async () => {
+    const models = await loadModelsUnlocked()
+    if (storageIssues.get('models')?.kind === 'unreadable') {
+      throw new Error('The model registry is unreadable; reconnect it or restore permissions and retry.')
+    }
+    const next = models.map(durableModel)
+    const saved = durableModel(model)
+    const idx = next.findIndex((m) => m.id === saved.id)
+    if (idx >= 0) next[idx] = saved
+    else next.push(saved)
+    await atomicWrite(registryPath(), JSON.stringify(next, null, 2))
+    modelRegistry = next
+  })
 }
 
 export async function removeInstalledModel(id: string): Promise<InstalledModel | null> {
-  const models = await readJSON<InstalledModel[]>(registryPath(), [])
-  const target = models.find((m) => m.id === id) ?? null
-  const next = models.filter((m) => m.id !== id)
-  await atomicWrite(registryPath(), JSON.stringify(next, null, 2))
-  return target
+  return modelRegistryQueue.run(async () => {
+    const models = await loadModelsUnlocked()
+    if (storageIssues.get('models')?.kind === 'unreadable') {
+      throw new Error('The model registry is unreadable; reconnect it or restore permissions and retry.')
+    }
+    const target = models.find((m) => m.id === id) ?? null
+    const next = models.filter((m) => m.id !== id)
+    await atomicWrite(registryPath(), JSON.stringify(next, null, 2))
+    modelRegistry = next
+    return target
+  })
 }
 
 export async function getInstalledModel(id: string): Promise<InstalledModel | null> {
@@ -324,6 +514,27 @@ export async function importLocalModel(filePath: string): Promise<InstalledModel
   return model
 }
 
+export async function relocateInstalledModel(id: string, filePath: string): Promise<InstalledModel> {
+  const target = await getInstalledModel(id)
+  if (!target) throw new Error('Model registry entry not found.')
+  const abs = path.resolve(filePath)
+  const stat = await fs.stat(abs)
+  if (!stat.isFile() || !/\.gguf$/i.test(abs)) throw new Error('Please choose a .gguf model file.')
+  const updated = {
+    ...target,
+    filename: path.basename(abs),
+    path: abs,
+    sizeBytes: stat.size,
+    // Once the user explicitly points Sibyl at a file, treat it as user-owned;
+    // a later library removal must never delete that chosen path.
+    local: true,
+    availability: 'available' as const,
+    availabilityError: undefined
+  }
+  await upsertInstalledModel(updated)
+  return updated
+}
+
 // ---------------------------------------------------------------------------
 // TTS voice registry
 // ---------------------------------------------------------------------------
@@ -344,21 +555,41 @@ function voicesRegistryPath(): string {
 }
 
 export async function listInstalledVoices(): Promise<InstalledVoice[]> {
-  const voices = await readJSON<InstalledVoice[]>(voicesRegistryPath(), [])
-  // Drop entries whose model file no longer exists on disk.
-  const alive = voices.filter((v) => existsSync(v.modelPath) && existsSync(v.configPath))
-  if (alive.length !== voices.length) {
-    await atomicWrite(voicesRegistryPath(), JSON.stringify(alive, null, 2))
-  }
-  return alive
+  return voiceRegistryQueue.run(async () => {
+    if (!voiceRegistry || storageIssues.get('voices')?.kind === 'unreadable') {
+      try {
+        voiceRegistry = await readRegistry('voices', voicesRegistryPath(), isVoiceArray)
+      } catch {
+        return voiceRegistry ?? []
+      }
+    }
+    return Promise.all(
+      voiceRegistry.map(async (voice) => {
+        const model = await fileAvailability(voice.modelPath)
+        const config = await fileAvailability(voice.configPath)
+        return {
+          ...voice,
+          ...(model.availability === 'available' ? config : model)
+        }
+      })
+    )
+  })
 }
 
 export async function upsertInstalledVoice(voice: InstalledVoice): Promise<void> {
-  const voices = await readJSON<InstalledVoice[]>(voicesRegistryPath(), [])
-  const idx = voices.findIndex((v) => v.id === voice.id)
-  if (idx >= 0) voices[idx] = voice
-  else voices.push(voice)
-  await atomicWrite(voicesRegistryPath(), JSON.stringify(voices, null, 2))
+  await voiceRegistryQueue.run(async () => {
+    if (!voiceRegistry) voiceRegistry = await readRegistry('voices', voicesRegistryPath(), isVoiceArray)
+    if (storageIssues.get('voices')?.kind === 'unreadable') {
+      throw new Error('The voice registry is unreadable; restore permissions and retry.')
+    }
+    const next = voiceRegistry.map(durableVoice)
+    const saved = durableVoice(voice)
+    const idx = next.findIndex((v) => v.id === saved.id)
+    if (idx >= 0) next[idx] = saved
+    else next.push(saved)
+    await atomicWrite(voicesRegistryPath(), JSON.stringify(next, null, 2))
+    voiceRegistry = next
+  })
 }
 
 export async function getInstalledVoice(id: string): Promise<InstalledVoice | null> {
@@ -367,11 +598,25 @@ export async function getInstalledVoice(id: string): Promise<InstalledVoice | nu
 }
 
 export async function removeInstalledVoice(id: string): Promise<InstalledVoice | null> {
-  const voices = await readJSON<InstalledVoice[]>(voicesRegistryPath(), [])
-  const target = voices.find((v) => v.id === id) ?? null
-  const next = voices.filter((v) => v.id !== id)
-  await atomicWrite(voicesRegistryPath(), JSON.stringify(next, null, 2))
-  return target
+  return voiceRegistryQueue.run(async () => {
+    if (!voiceRegistry) voiceRegistry = await readRegistry('voices', voicesRegistryPath(), isVoiceArray)
+    if (storageIssues.get('voices')?.kind === 'unreadable') {
+      throw new Error('The voice registry is unreadable; restore permissions and retry.')
+    }
+    const target = voiceRegistry.find((v) => v.id === id) ?? null
+    const next = voiceRegistry.filter((v) => v.id !== id)
+    await atomicWrite(voicesRegistryPath(), JSON.stringify(next, null, 2))
+    voiceRegistry = next
+    return target
+  })
+}
+
+export function listStorageIssues(): StorageIssue[] {
+  return [...storageIssues.values()]
+}
+
+export function recoveryPathFor(resource: StorageIssue['resource']): string | null {
+  return recoveryPaths.get(resource) ?? null
 }
 
 // ---------------------------------------------------------------------------
@@ -422,7 +667,10 @@ export async function listConversations(): Promise<Conversation[]> {
   const out: Conversation[] = []
   for (const f of files) {
     if (!f.endsWith('.json')) continue
-    const conv = await loadConversation(path.join(conversationsDir(), f))
+    const id = f.slice(0, -5)
+    const conv = await conversationQueue(id).run(() =>
+      loadConversation(path.join(conversationsDir(), f))
+    )
     if (conv) out.push(conv)
   }
   // Most recently updated first.
@@ -431,17 +679,26 @@ export async function listConversations(): Promise<Conversation[]> {
 }
 
 export async function getConversation(id: string): Promise<Conversation | null> {
-  return loadConversation(convFile(id))
+  return conversationQueue(id).run(() => loadConversation(convFile(id)))
 }
 
 export async function saveConversation(conversation: Conversation): Promise<void> {
-  await atomicWrite(convFile(conversation.id), JSON.stringify(conversation, null, 2))
+  await conversationQueue(conversation.id).run(async () => {
+    const filePath = convFile(conversation.id)
+    const durable = await loadConversation(filePath)
+    if (durable && durable.updatedAt > conversation.updatedAt) {
+      throw new Error('A newer conversation snapshot is already saved.')
+    }
+    await atomicWrite(filePath, JSON.stringify(conversation, null, 2))
+  })
 }
 
 export async function deleteConversation(id: string): Promise<void> {
-  try {
-    await fs.unlink(convFile(id))
-  } catch {
-    /* already gone */
-  }
+  await conversationQueue(id).run(async () => {
+    try {
+      await fs.unlink(convFile(id))
+    } catch (err) {
+      if (errorCode(err) !== 'ENOENT') throw err
+    }
+  })
 }

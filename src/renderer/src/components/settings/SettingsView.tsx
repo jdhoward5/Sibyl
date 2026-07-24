@@ -162,7 +162,6 @@ function VoiceSpeechSection({ settings }: { settings: RendererSettings }) {
   const downloads = useStore((s) => s.voiceDownloads)
   const speaking = useStore((s) => s.speakingMessageId)
   const available = status?.available ?? false
-  const installedIds = new Set(installed.map((v) => v.id))
 
   return (
     <Section
@@ -185,9 +184,13 @@ function VoiceSpeechSection({ settings }: { settings: RendererSettings }) {
       <div className="flex flex-col gap-2">
         <label className="text-[13px] text-sibyl-text">Voices</label>
         {TTS_VOICE_CATALOG.map((v) => {
-          const isInstalled = installedIds.has(v.id)
+          const installedVoice = installed.find((voice) => voice.id === v.id)
+          const isInstalled = Boolean(installedVoice)
+          const isUsable =
+            isInstalled &&
+            (!installedVoice?.availability || installedVoice.availability === 'available')
           const dl = downloads[v.id]
-          const isActive = tts.voiceId === v.id && isInstalled
+          const isActive = tts.voiceId === v.id && isUsable
           const pct = dl && dl.totalBytes > 0 ? Math.round((dl.receivedBytes / dl.totalBytes) * 100) : 0
           return (
             <div
@@ -197,9 +200,9 @@ function VoiceSpeechSection({ settings }: { settings: RendererSettings }) {
               }`}
             >
               <button
-                onClick={() => isInstalled && actions.updateTtsSettings({ voiceId: v.id, enabled: true })}
-                disabled={!isInstalled}
-                title={isInstalled ? 'Use this voice' : 'Download to use'}
+                onClick={() => isUsable && actions.updateTtsSettings({ voiceId: v.id, enabled: true })}
+                disabled={!isUsable}
+                title={isUsable ? 'Use this voice' : 'Download or repair to use'}
                 className="shrink-0 disabled:cursor-not-allowed"
               >
                 <span
@@ -214,6 +217,9 @@ function VoiceSpeechSection({ settings }: { settings: RendererSettings }) {
                 <div className="truncate text-[13px] text-sibyl-text">{v.name}</div>
                 <div className="truncate text-[11px] text-sibyl-muted">
                   {v.language} · {v.quality} · {formatBytes(v.sizeBytes)}
+                  {installedVoice?.availability &&
+                    installedVoice.availability !== 'available' &&
+                    ` · ${installedVoice.availability}`}
                 </div>
               </div>
               {dl ? (
@@ -227,6 +233,15 @@ function VoiceSpeechSection({ settings }: { settings: RendererSettings }) {
                     <XIcon size={13} />
                   </button>
                 </div>
+              ) : isInstalled && !isUsable ? (
+                <button
+                  onClick={() => actions.downloadVoice(v.id)}
+                  disabled={!available}
+                  className="btn-surface shrink-0 px-2.5 py-1 text-[12px] disabled:opacity-40"
+                  title={installedVoice?.availabilityError ?? 'Repair voice files'}
+                >
+                  <DownloadIcon size={13} /> Repair
+                </button>
               ) : isInstalled ? (
                 <div className="flex shrink-0 items-center gap-1.5">
                   <button
@@ -394,6 +409,7 @@ export function SettingsView() {
   const settings = useStore((s) => s.settings)
   const appInfo = useStore((s) => s.appInfo)
   const engine = useStore((s) => s.engine)
+  const storageIssues = useStore((s) => s.storageIssues)
   const [token, setToken] = useState('')
   const [tokenDirty, setTokenDirty] = useState(false)
 
@@ -476,7 +492,10 @@ export function SettingsView() {
               </p>
               <textarea
                 value={load.systemPrompt}
-                onChange={(e) => update({ load: { ...load, systemPrompt: e.target.value } })}
+                onChange={(e) =>
+                  actions.queueTextSettings({ load: { ...load, systemPrompt: e.target.value } })
+                }
+                onBlur={() => void actions.flushTextSettings()}
                 rows={3}
                 className="input resize-none"
               />
@@ -540,13 +559,14 @@ export function SettingsView() {
               <textarea
                 value={(gen.stopSequences ?? []).join('\n')}
                 onChange={(e) =>
-                  update({
+                  actions.queueTextSettings({
                     generation: {
                       ...gen,
                       stopSequences: e.target.value.split('\n').filter(Boolean)
                     }
                   })
                 }
+                onBlur={() => void actions.flushTextSettings()}
                 rows={2}
                 placeholder="One per line — generation stops when any is produced"
                 className="input resize-none font-mono text-[12px]"
@@ -682,6 +702,29 @@ export function SettingsView() {
                 </p>
               </div>
             </div>
+            {storageIssues.map((issue) => (
+              <div
+                key={issue.resource}
+                className="flex items-center justify-between gap-3 rounded-lg border border-amber-400/25 bg-amber-400/5 px-3 py-2.5"
+              >
+                <p className="text-[12px] text-amber-200">{issue.message}</p>
+                {issue.recoverable ? (
+                  <button
+                    onClick={() => void actions.revealStorageRecovery(issue.resource)}
+                    className="btn-surface shrink-0 px-2.5 py-1 text-[12px]"
+                  >
+                    Show recovery copy
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => void actions.retryStorage(issue.resource)}
+                    className="btn-surface shrink-0 px-2.5 py-1 text-[12px]"
+                  >
+                    Retry access
+                  </button>
+                )}
+              </div>
+            ))}
           </Section>
 
           <UpdatesSection />

@@ -67,6 +67,9 @@ export interface InstalledVoice {
   configPath: string
   sizeBytes: number
   installedAt: string
+  /** Current filesystem reachability; registry entries are retained while unavailable. */
+  availability?: import('./types').ResourceAvailability
+  availabilityError?: string
 }
 
 /** User preferences for speech. Lives inside AppSettings. */

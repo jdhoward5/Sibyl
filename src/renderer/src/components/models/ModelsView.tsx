@@ -50,6 +50,7 @@ export function ModelsView() {
                 {models.map((m) => {
                   const isLoaded = m.id === engine.modelId
                   const loading = engine.state === 'loading'
+                  const unavailable = m.availability && m.availability !== 'available'
                   const meta = [
                     m.local ? null : m.repoId.split('/')[0],
                     m.quant,
@@ -92,6 +93,14 @@ export function ModelsView() {
                               local
                             </span>
                           )}
+                          {unavailable && (
+                            <span
+                              className="shrink-0 rounded-full border border-amber-400/30 px-2 py-px font-mono text-[10px] text-amber-300"
+                              title={m.availabilityError}
+                            >
+                              {m.availability}
+                            </span>
+                          )}
                         </div>
                         <div className="mt-1.5 truncate font-mono text-[11px] text-sibyl-muted">{meta}</div>
                       </div>
@@ -99,12 +108,19 @@ export function ModelsView() {
                         <button onClick={() => void actions.unloadModel()} className="btn-surface h-[34px]">
                           Eject
                         </button>
+                      ) : unavailable ? (
+                        <button
+                          onClick={() => void actions.locateModel(m.id)}
+                          className="btn-surface h-[34px]"
+                        >
+                          Locate again
+                        </button>
                       ) : (
                         <button onClick={() => actions.loadModel(m.id)} disabled={loading} className="btn-primary h-[34px]">
                           Load
                         </button>
                       )}
-                      <button onClick={() => actions.revealModel(m.id)} className="btn-ghost h-[34px] w-[34px] p-0" title="Show in folder">
+                      <button onClick={() => actions.revealModel(m.id)} disabled={Boolean(unavailable)} className="btn-ghost h-[34px] w-[34px] p-0 disabled:opacity-40" title="Show in folder">
                         <FolderIcon size={16} />
                       </button>
                       <button
@@ -114,7 +130,8 @@ export function ModelsView() {
                             : `Delete ${m.filename}? This removes the file from disk.`
                           if (confirm(msg)) void actions.deleteModel(m.id)
                         }}
-                        className="btn-ghost h-[34px] w-[34px] p-0 hover:text-red-300"
+                        disabled={loading}
+                        className="btn-ghost h-[34px] w-[34px] p-0 hover:text-red-300 disabled:opacity-40"
                         title={m.local ? 'Remove from library (keeps the file)' : 'Delete model'}
                       >
                         <TrashIcon size={16} />
