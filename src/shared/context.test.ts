@@ -2,12 +2,22 @@ import { describe, it, expect } from 'vitest'
 import {
   contextLevel,
   contextPercent,
+  contextUsageIsCurrent,
   estimateTokens,
   formatTokens,
   keepRecentCount,
   levelColor,
   summaryBudgetTokens
 } from './context'
+
+describe('contextUsageIsCurrent', () => {
+  it('rejects late or mismatched conversation snapshots', () => {
+    expect(contextUsageIsCurrent({ conversationId: 'conv-1' }, 'conv-1', 'conv-1')).toBe(true)
+    expect(contextUsageIsCurrent({ conversationId: 'conv-1' }, 'conv-1', 'conv-2')).toBe(false)
+    expect(contextUsageIsCurrent({ conversationId: 'conv-2' }, 'conv-1', 'conv-1')).toBe(false)
+    expect(contextUsageIsCurrent(null, 'conv-1', 'conv-1')).toBe(false)
+  })
+})
 
 describe('contextLevel', () => {
   it('classifies against thresholds', () => {

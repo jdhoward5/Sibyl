@@ -4,7 +4,24 @@ import type { AppSettings, Conversation, GenerationEvent, InstalledModel } from 
 const fakes = vi.hoisted(() => {
   const settings = {
     gpu: 'cpu',
-    load: { gpuLayers: -1, contextSize: 2048, systemPrompt: 'test' }
+    load: { gpuLayers: -1, contextSize: 2048, systemPrompt: 'test' },
+    generation: {
+      temperature: 0.8,
+      topP: 0.9,
+      topK: 40,
+      minP: 0.05,
+      maxTokens: 256,
+      repeatPenalty: 1.1
+    },
+    context: {
+      autoCompact: true,
+      compactThreshold: 0.85,
+      warnThreshold: 0.7,
+      keepRecentMessages: 12,
+      keepRecentFraction: 0.35,
+      summaryTokenFraction: 0.1
+    },
+    personas: [] as AppSettings['personas']
   }
   const installed = new Map<string, InstalledModel>()
   const sessions: Array<{
@@ -59,7 +76,9 @@ function nativeModel() {
     trainContextSize: 4096,
     createContext: vi.fn(async () => context),
     dispose: vi.fn(async () => undefined),
-    tokenize: vi.fn(() => [1])
+    tokenize: vi.fn((text: string) =>
+      Array.from({ length: Math.max(1, Math.ceil(text.length / 4)) }, (_, i) => i)
+    )
   }
   return { value, context, sequence }
 }
@@ -92,6 +111,8 @@ describe('InferenceEngine lifecycle', () => {
     fakes.sessions.length = 0
     fakes.llama.loadModel.mockReset()
     fakes.settings.load.contextSize = 2048
+    fakes.settings.generation.maxTokens = 256
+    fakes.settings.personas = []
   })
 
   it('lets the newest concurrent load win and disposes the stale resources', async () => {
@@ -208,5 +229,71 @@ describe('InferenceEngine lifecycle', () => {
     await engine.load('model-a')
     expect(fakes.llama.loadModel).toHaveBeenCalledTimes(2)
     expect(first.value.dispose).toHaveBeenCalledOnce()
+  })
+
+  it('includes prospective user input in context accounting', async () => {
+    const first = nativeModel()
+    fakes.llama.loadModel.mockResolvedValueOnce(first.value)
+    const engine = new InferenceEngine()
+    await engine.load('model-a')
+
+    const current = await engine.computeUsage(conversation)
+    const projected = await engine.computeProjectedUsage(conversation, {
+      conversationId: conversation.id,
+      prospectiveInput: { content: 'x'.repeat(1_200) }
+    })
+
+    expect(projected.conversationId).toBe(conversation.id)
+    expect(projected.usedTokens).toBeGreaterThan(current.usedTokens + 250)
+    expect(projected.responseReserveTokens).toBe(256)
+    expect(projected.exact).toBe(false)
+  })
+
+  it('uses the selected scene speaker reserve and otherwise reserves the largest cast reply', async () => {
+    const first = nativeModel()
+    fakes.llama.loadModel.mockResolvedValueOnce(first.value)
+    fakes.settings.personas = [
+      {
+        id: 'persona-1',
+        name: 'One',
+        role: 'Scout',
+        brief: 'Be concise.',
+        avatar: { monogram: 'O', gradient: ['#000000', '#111111'] },
+        voiceTags: [],
+        generation: { ...fakes.settings.generation, maxTokens: 128 }
+      },
+      {
+        id: 'persona-2',
+        name: 'Two',
+        role: 'Scholar',
+        brief: 'Be expansive.',
+        avatar: { monogram: 'T', gradient: ['#222222', '#333333'] },
+        voiceTags: [],
+        generation: { ...fakes.settings.generation, maxTokens: 768 }
+      }
+    ]
+    const scene: Conversation = {
+      ...conversation,
+      id: 'scene-1',
+      cast: ['persona-1', 'persona-2'],
+      messages: []
+    }
+    const engine = new InferenceEngine()
+    await engine.load('model-a')
+
+    const selected = await engine.computeProjectedUsage(scene, {
+      conversationId: scene.id,
+      nextSpeakerId: 'persona-1'
+    })
+    const conservative = await engine.computeUsage(scene)
+
+    expect(selected.responseReserveTokens).toBe(128)
+    expect(conservative.responseReserveTokens).toBe(768)
+    await expect(
+      engine.computeProjectedUsage(scene, {
+        conversationId: scene.id,
+        nextSpeakerId: 'not-in-cast'
+      })
+    ).rejects.toThrow(/not in this scene/)
   })
 })

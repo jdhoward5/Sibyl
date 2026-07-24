@@ -49,6 +49,7 @@ import {
   parseChatAdvanceRequest,
   parseChatSendRequest,
   parseConversation,
+  parseContextUsageProjection,
   parseExportFormat,
   parseHfToken,
   parseModelId,
@@ -244,6 +245,16 @@ export function registerIpc(policy: RendererUrlPolicy): void {
     const conversation = conversationId ? await getConversation(conversationId) : null
     return engine.computeUsage(conversation)
   })
+  handle(
+    IPC.contextProjectedUsage,
+    policy,
+    (args) => parseArgs(args, parseContextUsageProjection),
+    async (_e, projection) => {
+      const conversation = await getConversation(projection.conversationId)
+      if (!conversation) throw new Error(`Conversation not found: ${projection.conversationId}`)
+      return engine.computeProjectedUsage(conversation, projection)
+    }
+  )
 
   // --- Conversations ------------------------------------------------------
   handle(IPC.convList, policy, parseNoArgs, async () => listConversations())

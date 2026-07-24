@@ -4,6 +4,7 @@ import type {
   Conversation,
   ConversationOverrides,
   ContextUsage,
+  ContextUsageProjection,
   DownloadProgress,
   EngineStatus,
   HFModelDetail,
@@ -12,6 +13,7 @@ import type {
   Persona,
   RendererSettings,
   RendererSettingsPatch,
+  Result,
   StorageIssue,
   UpdateStatus,
   UserCharacter
@@ -20,6 +22,16 @@ import type { AppInfo } from '@shared/ipc'
 import type { ExportFormat } from '@shared/export'
 import type { InstalledVoice, TtsSettings, TtsStatus, TtsVoiceDownload } from '@shared/tts'
 import { getAccentTheme, hexToRgbChannels } from '@shared/themes'
+import { contextUsageIsCurrent } from '@shared/context'
+import {
+  beginRendererTurn,
+  IDLE_RENDERER_TURN,
+  rendererTurnIsBusy,
+  rendererTurnMatches,
+  transitionRendererTurn,
+  type RendererTurnKind,
+  type RendererTurnState
+} from '@shared/turn'
 import { findPersona } from '@shared/personas'
 import {
   isScene,
@@ -69,6 +81,8 @@ export interface AppState {
   contextUsage: ContextUsage | null
   /** True while a compaction pass is running. */
   compacting: boolean
+  /** Renderer-owned authority for every chat/scene/compaction operation. */
+  turnOperation: RendererTurnState
   /** Live counters for the in-flight assistant turn (drives the streaming tok/s). */
   streamStats: { messageId: string; startedAt: number; tokens: number } | null
   /** Latest auto-update status, or null before the first snapshot arrives. */
@@ -122,6 +136,7 @@ const initialState: AppState = {
   },
   contextUsage: null,
   compacting: false,
+  turnOperation: IDLE_RENDERER_TURN,
   streamStats: null,
   update: null,
   toast: null,
@@ -177,12 +192,6 @@ function clearSceneTimer(): void {
   if (sceneTimer) clearTimeout(sceneTimer)
   sceneTimer = null
 }
-// Synchronous in-flight guard: set the instant we commit to a beat, cleared when
-// that beat's done/error event arrives. `state.engine.state` is a mirror updated a
-// full IPC round-trip late, so it can't stop two advances firing in the inter-beat
-// gap (autoplay tick + a Composer speak/direct) — this can.
-let beatInFlight = false
-
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 function toast(message: string, kind: 'info' | 'error' | 'success' = 'info'): void {
   setState({ toast: { id: Date.now(), kind, message } })
@@ -205,7 +214,12 @@ function updateConversation(id: string, fn: (c: Conversation) => Conversation): 
 }
 
 async function persist(conversation: Conversation): Promise<boolean> {
-  const result = await window.sibyl.conversations.save(conversation)
+  let result
+  try {
+    result = await window.sibyl.conversations.save(conversation)
+  } catch {
+    result = { ok: false, error: 'Conversation persistence became unavailable.' }
+  }
   if (result.ok) {
     setState((s) => ({
       unsavedConversationIds: s.unsavedConversationIds.filter((id) => id !== conversation.id)
@@ -219,6 +233,61 @@ async function persist(conversation: Conversation): Promise<boolean> {
   }))
   toast(result.error ?? 'Conversation could not be saved. Changes remain in memory.', 'error')
   return false
+}
+
+async function invalidateConversation(conversationId: string): Promise<string | null> {
+  try {
+    const result = await window.sibyl.chat.invalidateSession(conversationId)
+    return result.ok ? null : (result.error ?? 'The conversation session could not be rebuilt.')
+  } catch {
+    return 'The conversation session became unavailable.'
+  }
+}
+
+async function safeIpc<T>(
+  call: () => Promise<Result<T>>,
+  unavailableError: string
+): Promise<Result<T>> {
+  try {
+    return await call()
+  } catch {
+    return { ok: false, error: unavailableError }
+  }
+}
+
+function claimTurn(kind: RendererTurnKind, conversationId: string): string | null {
+  const operationId = uid()
+  const next = beginRendererTurn(state.turnOperation, {
+    operationId,
+    kind,
+    conversationId
+  })
+  if (!next) return null
+  setState({ turnOperation: next })
+  return operationId
+}
+
+function transitionTurn(
+  operationId: string,
+  patch: Partial<Omit<RendererTurnState, 'operationId'>>
+): void {
+  setState((s) => ({
+    turnOperation: transitionRendererTurn(s.turnOperation, operationId, patch)
+  }))
+}
+
+function failTurn(operationId: string, error: string): void {
+  transitionTurn(operationId, { phase: 'failed', error })
+}
+
+function failTurnForMessage(conversationId: string, messageId: string, error: string): void {
+  if (rendererTurnMatches(state.turnOperation, conversationId, messageId)) {
+    failTurn(state.turnOperation.operationId!, error)
+  }
+}
+
+function rollbackOptimisticConversation(snapshot: Conversation): void {
+  updateConversation(snapshot.id, () => snapshot)
 }
 
 let confirmedSettings: RendererSettings | null = null
@@ -322,8 +391,9 @@ async function runTurn(
   conv: Conversation,
   messages: ChatMessage[],
   userText: string,
-  assistantId: string
-): Promise<void> {
+  assistantId: string,
+  operationId: string
+): Promise<boolean> {
   const updated: Conversation = {
     ...conv,
     modelId: state.engine.modelId,
@@ -332,20 +402,62 @@ async function runTurn(
     updatedAt: now()
   }
   updateConversation(conv.id, () => updated)
+  transitionTurn(operationId, { messageId: assistantId })
   // Persist the truncated history and invalidate before sending so the engine
   // rebuilds its session from this new state rather than the stale KV cache.
-  if (!(await persist(updated))) return
-  await window.sibyl.chat.invalidateSession(conv.id)
+  if (!(await persist(updated))) {
+    rollbackOptimisticConversation(conv)
+    failTurn(operationId, 'The edited turn could not be saved.')
+    return false
+  }
+  const invalidationError = await invalidateConversation(conv.id)
+  if (invalidationError) {
+    updateConversation(conv.id, (c) => {
+      const failed = {
+        ...c,
+        messages: c.messages.map((m) =>
+          m.id === assistantId ? { ...m, error: invalidationError } : m
+        )
+      }
+      void persist(failed)
+      return failed
+    })
+    failTurn(operationId, invalidationError)
+    toast(invalidationError, 'error')
+    return false
+  }
   setState({ streamStats: { messageId: assistantId, startedAt: Date.now(), tokens: 0 } })
-  const res = await window.sibyl.chat.send({
-    conversationId: conv.id,
-    message: userText,
-    assistantMessageId: assistantId
-  })
+  const res = await safeIpc(
+    () =>
+      window.sibyl.chat.send({
+        conversationId: conv.id,
+        message: userText,
+        assistantMessageId: assistantId
+      }),
+    'Chat generation became unavailable.'
+  )
   if (!res.ok) {
     setState({ streamStats: null })
-    toast(res.error ?? 'Failed to send message', 'error')
+    const error = res.error ?? 'Failed to send message'
+    updateConversation(conv.id, (c) => {
+      const failed = {
+        ...c,
+        messages: c.messages.map((m) => (m.id === assistantId ? { ...m, error } : m))
+      }
+      void persist(failed)
+      return failed
+    })
+    failTurn(operationId, error)
+    toast(error, 'error')
+    return false
   }
+  if (
+    state.turnOperation.operationId === operationId &&
+    state.turnOperation.phase === 'preparing'
+  ) {
+    transitionTurn(operationId, { phase: 'generating' })
+  }
+  return true
 }
 
 // ---------------------------------------------------------------------------
@@ -411,7 +523,33 @@ export const actions = {
     confirmedSettings = settingsRes.data ?? null
 
     // Wire the audio player: it is the source of truth for what's audibly speaking.
-    ttsPlayer.init({ onSpeakingChange: (id) => setState({ speakingMessageId: id }) })
+    ttsPlayer.init({
+      onSpeakingChange: (id) =>
+        setState((s) => {
+          let turnOperation = s.turnOperation
+          const operationId = turnOperation.operationId
+          if (
+            id &&
+            operationId &&
+            turnOperation.messageId === id &&
+            turnOperation.phase === 'narration-pending'
+          ) {
+            turnOperation = transitionRendererTurn(turnOperation, operationId, {
+              phase: 'narrating'
+            })
+          } else if (
+            !id &&
+            operationId &&
+            (turnOperation.phase === 'narration-pending' ||
+              turnOperation.phase === 'narrating')
+          ) {
+            turnOperation = transitionRendererTurn(turnOperation, operationId, {
+              phase: 'complete'
+            })
+          }
+          return { speakingMessageId: id, turnOperation }
+        })
+    })
     ttsPlayer.setVolume(state.settings?.tts.volume ?? 1)
 
     if (state.settings?.theme) document.documentElement.classList.toggle('light', state.settings.theme === 'light')
@@ -435,7 +573,17 @@ export const actions = {
     window.sibyl.tts.onEvent((e) => {
       // Synthesis failures arrive as an event (speak() itself is fire-and-forget),
       // so surface them here — otherwise speech would just stop with no explanation.
-      if (e.type === 'error') toast(e.error, 'error')
+      if (e.type === 'error') {
+        if (
+          state.turnOperation.messageId === e.messageId &&
+          state.turnOperation.operationId &&
+          (state.turnOperation.phase === 'narration-pending' ||
+            state.turnOperation.phase === 'narrating')
+        ) {
+          failTurn(state.turnOperation.operationId, e.error)
+        }
+        toast(e.error, 'error')
+      }
       ttsPlayer.handleEvent(e)
     })
     window.sibyl.tts.onVoiceProgress((p) => {
@@ -474,6 +622,12 @@ export const actions = {
     })
     window.sibyl.chat.onEvent((e) => {
       if (e.type === 'token') {
+        if (
+          rendererTurnMatches(state.turnOperation, e.conversationId, e.messageId) &&
+          state.turnOperation.operationId
+        ) {
+          transitionTurn(state.turnOperation.operationId, { phase: 'generating' })
+        }
         // Append the chunk and advance the live tok/s counter in one update.
         setState((s) => {
           const prev = s.streamStats
@@ -496,7 +650,6 @@ export const actions = {
           }
         })
       } else if (e.type === 'done') {
-        beatInFlight = false // beat finished — the next advance may proceed
         let finishedText = ''
         updateConversation(e.conversationId, (c) => {
           const messages = c.messages.map((m) => {
@@ -521,12 +674,14 @@ export const actions = {
           return updated
         })
         setState({ streamStats: null })
+        if (rendererTurnMatches(state.turnOperation, e.conversationId, e.messageId)) {
+          transitionTurn(state.turnOperation.operationId!, { phase: 'complete' })
+        }
         // Auto-speak the freshly completed reply, when enabled.
         actions.maybeAutoSpeak(e.messageId, finishedText)
         // Drive scene autoplay forward to the next character's beat.
         if (state.scenePlay?.convId === e.conversationId) actions.scheduleNextBeat()
       } else if (e.type === 'aborted') {
-        beatInFlight = false
         updateConversation(e.conversationId, (c) => {
           const updated = {
             ...c,
@@ -541,10 +696,12 @@ export const actions = {
           return updated
         })
         setState({ streamStats: null })
+        if (rendererTurnMatches(state.turnOperation, e.conversationId, e.messageId)) {
+          transitionTurn(state.turnOperation.operationId!, { phase: 'complete' })
+        }
         if (state.scenePlay?.convId === e.conversationId) actions.stopScenePlay()
         toast('Generation stopped — the partial response was kept.', 'info')
       } else if (e.type === 'error') {
-        beatInFlight = false // beat failed — release the in-flight guard
         updateConversation(e.conversationId, (c) => {
           const updated = {
             ...c,
@@ -556,6 +713,7 @@ export const actions = {
           return updated
         })
         setState({ streamStats: null })
+        failTurnForMessage(e.conversationId, e.messageId, e.error)
         // A failed beat stops autoplay rather than spinning on the error.
         if (state.scenePlay?.convId === e.conversationId) actions.stopScenePlay()
         toast(e.error, 'error')
@@ -574,33 +732,105 @@ export const actions = {
       setState({ contextUsage: null })
       return
     }
-    const res = await window.sibyl.context.usage(state.activeConversationId)
-    if (res.ok && res.data) setState({ contextUsage: res.data })
+    const requestedConversationId = state.activeConversationId
+    let res
+    try {
+      res = await window.sibyl.context.usage(requestedConversationId)
+    } catch {
+      return
+    }
+    if (
+      res.ok &&
+      res.data &&
+      contextUsageIsCurrent(res.data, requestedConversationId, state.activeConversationId)
+    ) {
+      setState({ contextUsage: res.data })
+    }
+  },
+
+  /**
+   * Preflight a pending request. The result is deliberately local to the caller:
+   * it must not replace the meter with hypothetical input that may never commit.
+   */
+  async projectedContextUsage(
+    projection: ContextUsageProjection
+  ): Promise<ContextUsage | null> {
+    if (!state.engine.modelId || state.activeConversationId !== projection.conversationId) {
+      return null
+    }
+    let res
+    try {
+      res = await window.sibyl.context.projectedUsage(projection)
+    } catch {
+      return null
+    }
+    if (
+      !res.ok ||
+      !res.data ||
+      !contextUsageIsCurrent(
+        res.data,
+        projection.conversationId,
+        state.activeConversationId
+      )
+    ) {
+      return null
+    }
+    return res.data
   },
 
   /**
    * Summarize older turns of a conversation to reclaim context. Returns true on
    * success. `silent` suppresses the success toast (used by auto-compaction).
    */
-  async compact(conversationId?: string, opts?: { silent?: boolean }): Promise<boolean> {
+  async compact(
+    conversationId?: string,
+    opts?: { silent?: boolean; operationId?: string }
+  ): Promise<boolean> {
     const id = conversationId ?? state.activeConversationId
     if (!id) return false
-    if (state.compacting) return false
+    let operationId = opts?.operationId
+    const standalone = !operationId
+    if (operationId) {
+      if (
+        state.turnOperation.operationId !== operationId ||
+        state.turnOperation.conversationId !== id
+      ) {
+        return false
+      }
+    } else {
+      operationId = claimTurn('compact', id) ?? undefined
+      if (!operationId) return false
+    }
+    transitionTurn(operationId, { phase: 'compacting' })
     setState({ compacting: true })
-    const res = await window.sibyl.chat.compact(id)
+    let res
+    try {
+      res = await window.sibyl.chat.compact(id)
+    } catch {
+      res = { ok: false, error: 'Compaction became unavailable.' }
+    }
     setState({ compacting: false })
     if (!res.ok || !res.data) {
       // Auto-compaction is best-effort (e.g. nothing foldable yet) — stay quiet.
       if (!opts?.silent) toast(res.error ?? 'Compaction failed', 'error')
+      if (standalone) failTurn(operationId, res.error ?? 'Compaction failed')
+      else transitionTurn(operationId, { phase: 'preparing' })
       return false
     }
     const info = res.data
+    const previous = state.conversations.find((c) => c.id === id)
+    let updated: Conversation | null = null
     updateConversation(id, (c) => {
-      const updated = { ...c, compaction: info, updatedAt: now() }
-      persist(updated)
+      updated = { ...c, compaction: info, updatedAt: now() }
       return updated
     })
+    if (!updated || !(await persist(updated))) {
+      if (previous) rollbackOptimisticConversation(previous)
+      failTurn(operationId, 'The compacted conversation could not be saved.')
+      return false
+    }
     await actions.refreshContextUsage()
+    transitionTurn(operationId, { phase: standalone ? 'complete' : 'preparing' })
     if (!opts?.silent) toast(`Summarized ${info.foldedCount} earlier messages`, 'success')
     return true
   },
@@ -629,6 +859,7 @@ export const actions = {
     setState((s) => ({
       conversations: [conv, ...s.conversations],
       activeConversationId: conv.id,
+      contextUsage: null,
       view: 'chat',
       personaPickerOpen: false
     }))
@@ -663,6 +894,7 @@ export const actions = {
     setState((s) => ({
       conversations: [conv, ...s.conversations],
       activeConversationId: conv.id,
+      contextUsage: null,
       view: 'chat',
       personaPickerOpen: false
     }))
@@ -672,46 +904,97 @@ export const actions = {
   },
 
   /** Generate one beat. `speakerId` overrides the round-robin pick. */
-  async advanceScene(speakerId?: string): Promise<void> {
-    if (beatInFlight) return // a beat is already in flight (synchronous guard)
+  async advanceScene(speakerId?: string, continuedOperationId?: string): Promise<boolean> {
     if (!state.engine.modelId) {
       toast('Load a model before playing a scene.', 'error')
       if (state.scenePlay) actions.stopScenePlay()
-      return
+      if (continuedOperationId) failTurn(continuedOperationId, 'No model is loaded.')
+      return false
     }
-    if (state.engine.state === 'generating') return
+    if (continuedOperationId) {
+      const continued = state.turnOperation
+      if (
+        continued.operationId !== continuedOperationId ||
+        continued.kind !== 'scene' ||
+        continued.conversationId !== state.activeConversationId
+      ) {
+        const error = 'The conversation changed before the response could start.'
+        if (continued.operationId === continuedOperationId) failTurn(continuedOperationId, error)
+        toast(error, 'error')
+        return false
+      }
+    }
     let conv = activeConversation()
-    if (!conv || !isScene(conv)) return
+    if (!conv || !isScene(conv)) return false
+    const conversationId = conv.id
+    const operationId =
+      continuedOperationId ??
+      claimTurn('scene', conversationId)
+    if (!operationId) return false
+    if (
+      continuedOperationId &&
+      (state.turnOperation.operationId !== continuedOperationId ||
+        state.turnOperation.conversationId !== conversationId ||
+        state.turnOperation.kind !== 'scene')
+    ) {
+      return false
+    }
     const personas = state.settings?.personas
     // A scene needs ≥2 *resolvable* characters; some of the cast may have been
     // deleted from the library, which would otherwise leave a one-voice monologue.
     if (sceneCast(conv, personas).length < MIN_SCENE_CAST) {
-      toast('This scene needs at least two available characters.', 'error')
+      const error = 'This scene needs at least two available characters.'
+      failTurn(operationId, error)
+      toast(error, 'error')
       if (state.scenePlay) actions.stopScenePlay()
-      return
+      return false
     }
-    const conversationId = conv.id
     const sid = speakerId ?? nextSpeakerId(conv, personas)
     if (!sid) {
+      failTurn(operationId, 'No available scene speaker was found.')
       if (state.scenePlay) actions.stopScenePlay()
-      return
+      return false
     }
 
-    // Commit: block any concurrent advance until this beat's done/error arrives.
-    beatInFlight = true
     try {
       // Auto-compaction: summarize older beats before the window overflows so the
       // scene can run long without truncating the next reply.
-      const ctx = state.contextUsage
+      const ctx = await actions.projectedContextUsage({
+        conversationId,
+        nextSpeakerId: sid
+      })
+      // Projection is asynchronous. If the user switched threads while it was
+      // running, do not commit a beat to the conversation they left.
+      if (state.activeConversationId !== conversationId) {
+        const error = 'The conversation changed before the response could start.'
+        failTurn(operationId, error)
+        toast(error, 'error')
+        return false
+      }
       const cset = state.settings?.context
       if (
         cset?.autoCompact &&
         ctx &&
+        state.activeConversationId === conversationId &&
+        ctx.conversationId === conversationId &&
         ctx.contextSize > 0 &&
         (ctx.willOverflow || ctx.fraction >= cset.compactThreshold)
       ) {
-        const did = await actions.compact(conversationId, { silent: true })
+        const did = await actions.compact(conversationId, {
+          silent: true,
+          operationId
+        })
+        if (state.turnOperation.operationId === operationId && state.turnOperation.phase === 'failed') {
+          if (state.scenePlay) actions.stopScenePlay()
+          return false
+        }
         if (did) conv = state.conversations.find((c) => c.id === conversationId) ?? conv
+      }
+      if (state.activeConversationId !== conversationId) {
+        const error = 'The conversation changed before the response could start.'
+        failTurn(operationId, error)
+        toast(error, 'error')
+        return false
       }
 
       const persona = findPersona(personas, sid)
@@ -728,41 +1011,84 @@ export const actions = {
         saved = { ...c, modelId: state.engine.modelId, messages: [...c.messages, beat], updatedAt: now() }
         return saved
       })
+      transitionTurn(operationId, { messageId: beat.id })
       if (saved && !(await persist(saved))) {
-        beatInFlight = false
+        rollbackOptimisticConversation(conv)
+        failTurn(operationId, 'The scene beat could not be saved.')
         if (state.scenePlay) actions.stopScenePlay()
-        return
+        return false
       }
       // The active speaker (and system prompt) changed — force a fresh rebuild.
-      await window.sibyl.chat.invalidateSession(conversationId)
-      setState({ streamStats: { messageId: beat.id, startedAt: Date.now(), tokens: 0 } })
-      const res = await window.sibyl.chat.advance({
-        conversationId,
-        speakerId: sid,
-        assistantMessageId: beat.id
-      })
-      // On success the latch clears when the beat's done/error event arrives;
-      // a failed kickoff produces no such event, so release it here.
-      if (!res.ok) {
-        beatInFlight = false
-        setState({ streamStats: null })
-        toast(res.error ?? 'Failed to advance the scene', 'error')
+      const invalidationError = await invalidateConversation(conversationId)
+      if (invalidationError) {
+        updateConversation(conversationId, (c) => {
+          const updated = {
+            ...c,
+            messages: c.messages.map((m) =>
+              m.id === beat.id ? { ...m, error: invalidationError } : m
+            )
+          }
+          void persist(updated)
+          return updated
+        })
+        failTurn(operationId, invalidationError)
+        toast(invalidationError, 'error')
         if (state.scenePlay) actions.stopScenePlay()
+        return false
       }
+      setState({ streamStats: { messageId: beat.id, startedAt: Date.now(), tokens: 0 } })
+      const res = await safeIpc(
+        () =>
+          window.sibyl.chat.advance({
+            conversationId,
+            speakerId: sid,
+            assistantMessageId: beat.id
+          }),
+        'Scene generation became unavailable.'
+      )
+      if (!res.ok) {
+        setState({ streamStats: null })
+        const error = res.error ?? 'Failed to advance the scene'
+        updateConversation(conversationId, (c) => {
+          const updated = {
+            ...c,
+            messages: c.messages.map((m) => (m.id === beat.id ? { ...m, error } : m))
+          }
+          void persist(updated)
+          return updated
+        })
+        failTurn(operationId, error)
+        toast(error, 'error')
+        if (state.scenePlay) actions.stopScenePlay()
+        return false
+      }
+      if (
+        state.turnOperation.operationId === operationId &&
+        state.turnOperation.phase === 'preparing'
+      ) {
+        transitionTurn(operationId, { phase: 'generating' })
+      }
+      return true
     } catch (err) {
-      beatInFlight = false
-      toast(err instanceof Error ? err.message : 'Failed to advance the scene', 'error')
+      const error = err instanceof Error ? err.message : 'Failed to advance the scene'
+      failTurn(operationId, error)
+      toast(error, 'error')
       if (state.scenePlay) actions.stopScenePlay()
+      return false
     }
   },
 
   /** Speak into a scene as the human's own character, then let the cast respond. */
-  async sceneSpeak(text: string): Promise<void> {
+  async sceneSpeak(text: string): Promise<boolean> {
     const content = text.trim()
-    if (!content) return
-    if (state.engine.state === 'generating') return
+    if (!content || !state.engine.modelId) {
+      if (!state.engine.modelId) toast('Load a model before playing a scene.', 'error')
+      return false
+    }
     const conv = activeConversation()
-    if (!conv || !isScene(conv)) return
+    if (!conv || !isScene(conv)) return false
+    const operationId = claimTurn('scene', conv.id)
+    if (!operationId) return false
     maybePrewarmAudio() // still inside the submit gesture
     const msg: ChatMessage = { id: uid(), role: 'user', content, createdAt: now() }
     let saved: Conversation | null = null
@@ -770,18 +1096,25 @@ export const actions = {
       saved = { ...c, messages: [...c.messages, msg], updatedAt: now() }
       return saved
     })
-    if (saved && !(await persist(saved))) return
-    await window.sibyl.chat.invalidateSession(conv.id)
-    await actions.advanceScene()
+    if (saved && !(await persist(saved))) {
+      rollbackOptimisticConversation(conv)
+      failTurn(operationId, 'Your scene turn could not be saved.')
+      return false
+    }
+    return actions.advanceScene(undefined, operationId)
   },
 
   /** Drop an out-of-character director note, then play one beat shaped by it. */
-  async sceneDirect(text: string): Promise<void> {
+  async sceneDirect(text: string): Promise<boolean> {
     const content = text.trim()
-    if (!content) return
-    if (state.engine.state === 'generating') return
+    if (!content || !state.engine.modelId) {
+      if (!state.engine.modelId) toast('Load a model before playing a scene.', 'error')
+      return false
+    }
     const conv = activeConversation()
-    if (!conv || !isScene(conv)) return
+    if (!conv || !isScene(conv)) return false
+    const operationId = claimTurn('scene', conv.id)
+    if (!operationId) return false
     maybePrewarmAudio() // still inside the submit gesture
     const note: ChatMessage = { id: uid(), role: 'user', content, createdAt: now(), director: true }
     let saved: Conversation | null = null
@@ -789,9 +1122,12 @@ export const actions = {
       saved = { ...c, messages: [...c.messages, note], updatedAt: now() }
       return saved
     })
-    if (saved && !(await persist(saved))) return
-    await window.sibyl.chat.invalidateSession(conv.id)
-    await actions.advanceScene()
+    if (saved && !(await persist(saved))) {
+      rollbackOptimisticConversation(conv)
+      failTurn(operationId, 'The director note could not be saved.')
+      return false
+    }
+    return actions.advanceScene(undefined, operationId)
   },
 
   /** Begin watching: auto-advance the active scene beat after beat. */
@@ -839,7 +1175,7 @@ export const actions = {
     // flight and waiting for the current line's narration to finish.
     const narrating =
       Boolean(state.settings?.tts.enabled && state.settings.tts.autoSpeak && state.speakingMessageId)
-    if (beatInFlight || state.engine.state === 'generating' || narrating) {
+    if (rendererTurnIsBusy(state.turnOperation) || narrating) {
       clearSceneTimer()
       sceneTimer = setTimeout(() => actions.tickScenePlay(), 300)
       return
@@ -943,11 +1279,17 @@ export const actions = {
   selectConversation(id: string): void {
     // Switching away from the conversation that's auto-playing stops the loop.
     if (state.scenePlay && state.scenePlay.convId !== id) actions.stopScenePlay()
-    setState({ activeConversationId: id, view: 'chat', personaPickerOpen: false })
+    setState({
+      activeConversationId: id,
+      contextUsage: null,
+      view: 'chat',
+      personaPickerOpen: false
+    })
     void actions.refreshContextUsage()
   },
 
   async deleteConversation(id: string): Promise<void> {
+    const wasActive = state.activeConversationId === id
     if (state.scenePlay?.convId === id) actions.stopScenePlay()
     const result = await window.sibyl.conversations.delete(id)
     if (!result.ok) {
@@ -960,9 +1302,11 @@ export const actions = {
         conversations,
         unsavedConversationIds: s.unsavedConversationIds.filter((convId) => convId !== id),
         activeConversationId:
-          s.activeConversationId === id ? (conversations[0]?.id ?? null) : s.activeConversationId
+          s.activeConversationId === id ? (conversations[0]?.id ?? null) : s.activeConversationId,
+        contextUsage: s.activeConversationId === id ? null : s.contextUsage
       }
     })
+    if (wasActive) void actions.refreshContextUsage()
   },
 
   renameConversation(id: string, title: string): void {
@@ -973,44 +1317,71 @@ export const actions = {
     })
   },
 
-  async sendMessage(text: string): Promise<void> {
+  async sendMessage(text: string): Promise<boolean> {
     const content = text.trim()
-    if (!content) return
+    if (!content) return false
     if (!state.engine.modelId) {
       toast('Load a model before chatting.', 'error')
-      return
+      return false
     }
+    if (rendererTurnIsBusy(state.turnOperation)) return false
     let conv = activeConversation()
     if (!conv) {
       const id = actions.newConversation()
       conv = state.conversations.find((c) => c.id === id) ?? null
-      if (!conv) return
+      if (!conv) return false
     }
     const conversationId = conv.id
+    const operationId = claimTurn('chat', conversationId)
+    if (!operationId) return false
 
     // Auto-compaction: if the window is about to overflow, summarize older turns
     // before adding this turn so the new message is never folded away.
-    const ctx = state.contextUsage
+    let ctx = await actions.projectedContextUsage({
+      conversationId,
+      prospectiveInput: { content }
+    })
+    // Do not let the new preflight await turn a send into a mutation of a thread
+    // the user has already switched away from.
+    if (state.activeConversationId !== conversationId) {
+      const error = 'The conversation changed before the response could start.'
+      failTurn(operationId, error)
+      toast(error, 'error')
+      return false
+    }
     const cset = state.settings?.context
     if (
       cset?.autoCompact &&
       ctx &&
+      state.activeConversationId === conversationId &&
+      ctx.conversationId === conversationId &&
       ctx.contextSize > 0 &&
       (ctx.willOverflow || ctx.fraction >= cset.compactThreshold)
     ) {
-      const did = await actions.compact(conversationId, { silent: true })
+      const did = await actions.compact(conversationId, { silent: true, operationId })
+      if (state.turnOperation.operationId === operationId && state.turnOperation.phase === 'failed') {
+        return false
+      }
       if (did) {
         conv = state.conversations.find((c) => c.id === conversationId) ?? conv
-        // Fit check: compact() refreshed usage. If the recent tail still won't
-        // fit, summarizing couldn't free enough — warn rather than silently
-        // truncate the reply.
-        const u = state.contextUsage
-        if (u?.conversationId === conversationId && u.willOverflow) {
+        // Re-run the same prospective calculation: the ordinary refresh issued
+        // by compact() still excludes the pending user turn.
+        ctx = await actions.projectedContextUsage({
+          conversationId,
+          prospectiveInput: { content }
+        })
+        if (ctx?.conversationId === conversationId && ctx.willOverflow) {
           toast('Summarized, but recent messages still fill the window — the reply may be truncated.', 'error')
         } else {
           toast('Context was full — older messages were summarized', 'info')
         }
       }
+    }
+    if (state.activeConversationId !== conversationId) {
+      const error = 'The conversation changed before the response could start.'
+      failTurn(operationId, error)
+      toast(error, 'error')
+      return false
     }
 
     // Pre-warm the audio context inside this send gesture so an auto-spoken reply
@@ -1034,40 +1405,84 @@ export const actions = {
       }
       return saved
     })
+    transitionTurn(operationId, { messageId: assistantMsg.id })
     // Persist the user turn before generation so the engine can rebuild history.
-    if (saved && !(await persist(saved))) return
+    if (saved && !(await persist(saved))) {
+      rollbackOptimisticConversation(conv)
+      failTurn(operationId, 'The message could not be saved before generation.')
+      return false
+    }
 
     setState({ streamStats: { messageId: assistantMsg.id, startedAt: Date.now(), tokens: 0 } })
-    const res = await window.sibyl.chat.send({
-      conversationId,
-      message: content,
-      assistantMessageId: assistantMsg.id
-    })
+    const res = await safeIpc(
+      () =>
+        window.sibyl.chat.send({
+          conversationId,
+          message: content,
+          assistantMessageId: assistantMsg.id
+        }),
+      'Chat generation became unavailable.'
+    )
     if (!res.ok) {
       setState({ streamStats: null })
-      toast(res.error ?? 'Failed to send message', 'error')
+      const error = res.error ?? 'Failed to send message'
+      updateConversation(conversationId, (c) => {
+        const updated = {
+          ...c,
+          messages: c.messages.map((m) =>
+            m.id === assistantMsg.id ? { ...m, error } : m
+          )
+        }
+        void persist(updated)
+        return updated
+      })
+      failTurn(operationId, error)
+      toast(error, 'error')
+      return false
     }
+    if (
+      state.turnOperation.operationId === operationId &&
+      state.turnOperation.phase === 'preparing'
+    ) {
+      transitionTurn(operationId, { phase: 'generating' })
+    }
+    return true
   },
 
   abortGeneration(): void {
     // Stopping also halts scene autoplay so the aborted beat's 'done' doesn't
     // immediately schedule the next one.
     if (state.scenePlay) actions.stopScenePlay()
-    const operation = state.engine.operation
-    const conversationId = state.activeConversationId
-    const messageId =
-      operation?.conversationId === conversationId
-        ? operation.messageId
-        : state.streamStats?.messageId
-    if (conversationId && messageId) {
-      const operationMatches =
-        operation?.conversationId === conversationId && operation.messageId === messageId
-      void window.sibyl.chat.abort({
-        conversationId,
-        messageId,
-        operationId: operationMatches ? operation.id : undefined
+    const turn = state.turnOperation
+    const conversationId = turn.conversationId
+    const messageId = turn.messageId
+    const operationId = turn.operationId
+    if (!conversationId || !messageId || !operationId || turn.phase !== 'generating') return
+    transitionTurn(operationId, { phase: 'stopping' })
+    const engineOperation = state.engine.operation
+    const operationMatches =
+      engineOperation?.conversationId === conversationId &&
+      engineOperation.messageId === messageId
+    void safeIpc(
+      () =>
+        window.sibyl.chat.abort({
+          conversationId,
+          messageId,
+          operationId: operationMatches ? engineOperation.id : undefined
+        }),
+      'The active response could not be stopped.'
+    )
+      .then((res) => {
+        if (
+          (!res.ok || !res.data?.aborted) &&
+          state.turnOperation.operationId === operationId &&
+          state.turnOperation.phase === 'stopping'
+        ) {
+          const error = res.error ?? 'The active response could not be stopped.'
+          failTurn(operationId, error)
+          toast(error, 'error')
+        }
       })
-    }
   },
 
   /** Remove a single message from the active conversation. */
@@ -1098,11 +1513,13 @@ export const actions = {
       toast('Load a model before regenerating.', 'error')
       return
     }
-    if (state.engine.state === 'generating') return
+    if (rendererTurnIsBusy(state.turnOperation)) return
     const conv = activeConversation()
     if (!conv) return
     const idx = conv.messages.findIndex((m) => m.id === assistantMessageId)
     if (idx < 0) return
+    const operationId = claimTurn(isScene(conv) ? 'scene' : 'chat', conv.id)
+    if (!operationId) return
     // Scene beat: reroll it — drop this beat (and anything after) and have the
     // same character speak again.
     if (isScene(conv) && conv.messages[idx].speakerId) {
@@ -1115,9 +1532,12 @@ export const actions = {
         updatedAt: now()
       }
       updateConversation(conv.id, () => updated)
-      if (!(await persist(updated))) return
-      await window.sibyl.chat.invalidateSession(conv.id)
-      await actions.advanceScene(speakerId)
+      if (!(await persist(updated))) {
+        rollbackOptimisticConversation(conv)
+        failTurn(operationId, 'The scene history could not be saved.')
+        return
+      }
+      await actions.advanceScene(speakerId, operationId)
       return
     }
     let userIdx = -1
@@ -1127,10 +1547,21 @@ export const actions = {
         break
       }
     }
-    if (userIdx < 0) return
+    if (userIdx < 0) {
+      const error = 'No user turn was found to regenerate.'
+      failTurn(operationId, error)
+      toast(error, 'error')
+      return
+    }
     const userText = conv.messages[userIdx].content
     const assistantMsg: ChatMessage = { id: uid(), role: 'assistant', content: '', createdAt: now() }
-    await runTurn(conv, [...conv.messages.slice(0, userIdx + 1), assistantMsg], userText, assistantMsg.id)
+    await runTurn(
+      conv,
+      [...conv.messages.slice(0, userIdx + 1), assistantMsg],
+      userText,
+      assistantMsg.id,
+      operationId
+    )
   },
 
   /**
@@ -1144,11 +1575,13 @@ export const actions = {
       toast('Load a model before sending.', 'error')
       return
     }
-    if (state.engine.state === 'generating') return
+    if (rendererTurnIsBusy(state.turnOperation)) return
     const conv = activeConversation()
     if (!conv) return
     const idx = conv.messages.findIndex((m) => m.id === userMessageId)
     if (idx < 0 || conv.messages[idx].role !== 'user') return
+    const operationId = claimTurn(isScene(conv) ? 'scene' : 'chat', conv.id)
+    if (!operationId) return
     const editedUser: ChatMessage = { ...conv.messages[idx], content, createdAt: now() }
     // Scene: replace the human's line, truncate what followed, then let the next
     // character respond to the edited turn (rather than the single-persona path).
@@ -1161,13 +1594,22 @@ export const actions = {
         updatedAt: now()
       }
       updateConversation(conv.id, () => updated)
-      if (!(await persist(updated))) return
-      await window.sibyl.chat.invalidateSession(conv.id)
-      await actions.advanceScene()
+      if (!(await persist(updated))) {
+        rollbackOptimisticConversation(conv)
+        failTurn(operationId, 'The edited scene turn could not be saved.')
+        return
+      }
+      await actions.advanceScene(undefined, operationId)
       return
     }
     const assistantMsg: ChatMessage = { id: uid(), role: 'assistant', content: '', createdAt: now() }
-    await runTurn(conv, [...conv.messages.slice(0, idx), editedUser, assistantMsg], content, assistantMsg.id)
+    await runTurn(
+      conv,
+      [...conv.messages.slice(0, idx), editedUser, assistantMsg],
+      content,
+      assistantMsg.id,
+      operationId
+    )
   },
 
   /**
@@ -1199,6 +1641,7 @@ export const actions = {
     setState((s) => ({
       conversations: [branch, ...s.conversations],
       activeConversationId: branch.id,
+      contextUsage: null,
       view: 'chat'
     }))
     persist(branch)
@@ -1504,7 +1947,20 @@ export const actions = {
     if (!s?.enabled || !s.autoSpeak || !text.trim()) return
     if (!ttsReadiness().ok) return
     ttsPlayer.ensureContext()
-    void window.sibyl.tts.speak({ messageId, text })
+    const operationId =
+      state.turnOperation.messageId === messageId
+        ? state.turnOperation.operationId
+        : undefined
+    if (operationId) transitionTurn(operationId, { phase: 'narration-pending' })
+    void safeIpc(
+      () => window.sibyl.tts.speak({ messageId, text }),
+      'Speech became unavailable.'
+    ).then((res) => {
+      if (!res.ok && operationId) {
+        failTurn(operationId, res.error ?? 'Failed to start speech')
+        toast(res.error ?? 'Failed to start speech', 'error')
+      }
+    })
   },
 
   // --- auto-update --------------------------------------------------------

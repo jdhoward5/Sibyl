@@ -4,6 +4,7 @@ import { actions, useStore } from '../../store'
 import { formatTokens } from '@shared/context'
 import { findPersona } from '@shared/personas'
 import { isScene, sceneCast, nextSpeakerId } from '@shared/scene'
+import { rendererTurnIsBusy } from '@shared/turn'
 import { ConversationList } from './ConversationList'
 import { Message } from './Message'
 import { Composer } from './Composer'
@@ -33,7 +34,7 @@ import {
 function OverflowBanner() {
   const usage = useStore((s) => s.contextUsage)
   const compacting = useStore((s) => s.compacting)
-  const generating = useStore((s) => s.engine.state === 'generating')
+  const busy = useStore((s) => rendererTurnIsBusy(s.turnOperation))
   const autoCompact = useStore((s) => s.settings?.context.autoCompact ?? false)
   if (!usage || !usage.willOverflow) return null
   return (
@@ -47,7 +48,7 @@ function OverflowBanner() {
       </span>
       <button
         onClick={() => void actions.compact()}
-        disabled={compacting || generating}
+        disabled={compacting || busy}
         className="btn-surface shrink-0 px-2.5 py-1 text-[12px] disabled:opacity-40"
       >
         <CompressIcon size={13} /> {compacting ? 'Compacting…' : 'Compact now'}
@@ -118,7 +119,7 @@ function HeaderMenu({
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const compacting = useStore((s) => s.compacting)
-  const generating = useStore((s) => s.engine.state === 'generating')
+  const busy = useStore((s) => rendererTurnIsBusy(s.turnOperation))
   const canCompact = useStore((s) => Boolean(s.engine.modelId) && (s.contextUsage?.contextSize ?? 0) > 0)
 
   useEffect(() => {
@@ -153,7 +154,7 @@ function HeaderMenu({
           {canCompact && (
             <button
               className={item}
-              disabled={compacting || generating}
+              disabled={compacting || busy}
               onClick={() => {
                 setOpen(false)
                 void actions.compact()
@@ -346,7 +347,7 @@ function SceneStrip({
 }) {
   const personas = useStore((s) => s.settings?.personas ?? [])
   const playing = useStore((s) => s.scenePlay?.convId === conversation.id)
-  const generating = useStore((s) => s.engine.state === 'generating')
+  const busy = useStore((s) => rendererTurnIsBusy(s.turnOperation))
   const hasModel = useStore((s) => Boolean(s.engine.modelId))
   const cast = sceneCast(conversation, personas)
   const nextId = nextSpeakerId(conversation, personas)
@@ -361,7 +362,7 @@ function SceneStrip({
             key={p.id}
             persona={p}
             isNext={p.id === nextId && !playing}
-            disabled={generating || playing}
+            disabled={busy || playing}
             onSpeak={() => void actions.advanceScene(p.id)}
             onRemove={() => actions.removeCastMember(p.id)}
           />
@@ -372,7 +373,7 @@ function SceneStrip({
       <div className="flex shrink-0 items-center gap-1.5 border-l border-sibyl-border/60 pl-2.5">
         <button
           onClick={() => actions.toggleScenePlay()}
-          disabled={!hasModel || cast.length < 2}
+          disabled={!hasModel || cast.length < 2 || (busy && !playing)}
           className={`no-drag flex h-8 items-center gap-1.5 rounded-md px-2.5 text-[12.5px] font-semibold transition-colors disabled:opacity-40 ${
             playing
               ? 'bg-sibyl-accent/15 text-sibyl-accent'
@@ -385,7 +386,7 @@ function SceneStrip({
         </button>
         <button
           onClick={() => void actions.advanceScene()}
-          disabled={!hasModel || generating || playing || cast.length < 2}
+          disabled={!hasModel || busy || playing || cast.length < 2}
           className="btn-ghost no-drag h-8 w-8 p-0 disabled:opacity-40"
           title={nextName ? `Advance — ${nextName} speaks next` : 'Advance one beat'}
         >
@@ -410,7 +411,7 @@ export function ChatView() {
   const personas = useStore((s) => s.settings?.personas ?? [])
   const pickerOpen = useStore((s) => s.personaPickerOpen)
   const hasConversations = useStore((s) => s.conversations.length > 0)
-  const generating = useStore((s) => s.engine.state === 'generating')
+  const generating = useStore((s) => s.turnOperation.phase === 'generating')
   const scrollRef = useRef<HTMLDivElement>(null)
   const findInputRef = useRef<HTMLInputElement>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)

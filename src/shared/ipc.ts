@@ -6,6 +6,7 @@ import type {
   CompactionInfo,
   Conversation,
   ContextUsage,
+  ContextUsageProjection,
   DownloadProgress,
   EngineStatus,
   GenerationEvent,
@@ -58,6 +59,7 @@ export const IPC = {
 
   // Context window
   contextUsage: 'context:usage', // on-demand snapshot for a conversation
+  contextProjectedUsage: 'context:projectedUsage', // preflight incl. pending input/speaker
   contextEvent: 'context:event', // main → renderer usage updates
 
   // Conversations persistence
@@ -193,6 +195,8 @@ export interface SibylBridge {
   context: {
     /** Estimate (or read, if active) the context fill for a conversation. */
     usage(conversationId: string | null): Promise<Result<ContextUsage>>
+    /** Estimate the next request including pending input and/or a selected scene speaker. */
+    projectedUsage(projection: ContextUsageProjection): Promise<Result<ContextUsage>>
     onUsage(cb: (u: ContextUsage) => void): () => void
   }
   conversations: {

@@ -119,6 +119,14 @@ async function run() {
     await composer.fill('hello world, this is a quick token-count check!')
     await page.waitForTimeout(100)
     assert((await page.getByText(/~\d+ tokens/).count()) >= 1, 'composer shows a live token estimate')
+
+    // Rejected kickoff must retain the draft. This isolated run deliberately has
+    // no loaded model, so Send returns false instead of accepting the turn.
+    const rejectedDraft = 'keep this draft when no model is loaded'
+    await composer.fill(rejectedDraft)
+    await page.getByTitle('Send').click()
+    await page.waitForTimeout(150)
+    assert((await composer.inputValue()) === rejectedDraft, 'rejected send preserves the composer draft')
     await composer.fill('')
     await page.waitForTimeout(50)
 

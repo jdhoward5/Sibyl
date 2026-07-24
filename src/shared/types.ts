@@ -466,6 +466,18 @@ export interface ContextUsage {
   exact: boolean
 }
 
+/** Prospective context calculation used before committing a new turn. */
+export interface ContextUsageProjection {
+  conversationId: string
+  /** A not-yet-persisted human line or director note to include in the estimate. */
+  prospectiveInput?: {
+    content: string
+    director?: boolean
+  }
+  /** The scene character selected for the next beat, when already known. */
+  nextSpeakerId?: string
+}
+
 /** Streaming events emitted from main → renderer during generation. */
 export type GenerationEvent =
   | { type: 'token'; conversationId: string; messageId: string; text: string }

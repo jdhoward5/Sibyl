@@ -5,6 +5,7 @@ import {
   IPC_LIMITS,
   parseCanonicalId,
   parseChatSendRequest,
+  parseContextUsageProjection,
   parseConversation,
   parseRendererSettingsPatch,
   parseRepoFilename
@@ -62,6 +63,12 @@ describe('IPC runtime validation', () => {
       })
     ).toThrow(/at most/)
     expect(() =>
+      parseContextUsageProjection({
+        conversationId: 'conv-1',
+        prospectiveInput: { content: tooLong }
+      })
+    ).toThrow(/at most/)
+    expect(() =>
       parseRendererSettingsPatch({
         generation: {
           temperature: 1,
@@ -74,6 +81,26 @@ describe('IPC runtime validation', () => {
         }
       })
     ).toThrow(/at most/)
+  })
+
+  it('validates prospective context input and the selected scene speaker', () => {
+    expect(
+      parseContextUsageProjection({
+        conversationId: 'conv-1',
+        prospectiveInput: { content: 'A new direction', director: true },
+        nextSpeakerId: 'persona-2'
+      })
+    ).toEqual({
+      conversationId: 'conv-1',
+      prospectiveInput: { content: 'A new direction', director: true },
+      nextSpeakerId: 'persona-2'
+    })
+    expect(() =>
+      parseContextUsageProjection({
+        conversationId: 'conv-1',
+        prospectiveInput: { content: 'hello', unexpected: true }
+      })
+    ).toThrow(/unknown field/)
   })
 
   it('clamps finite native-facing numeric settings', () => {

@@ -55,6 +55,7 @@ const bridge: SibylBridge = {
   },
   context: {
     usage: (conversationId) => ipcRenderer.invoke(IPC.contextUsage, conversationId),
+    projectedUsage: (projection) => ipcRenderer.invoke(IPC.contextProjectedUsage, projection),
     onUsage: (cb) => subscribe(IPC.contextEvent, cb)
   },
   conversations: {

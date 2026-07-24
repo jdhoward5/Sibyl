@@ -6,6 +6,7 @@ import type {
   CompactionInfo,
   Conversation,
   ContextUsage,
+  ContextUsageProjection,
   EngineStatus,
   EngineOperation,
   GenerationEvent,
@@ -760,13 +761,19 @@ export class InferenceEngine extends EventEmitter {
    * window: the effective system prompt (incl. summary) plus the live tail,
    * with a small per-turn allowance for chat-template framing.
    */
-  private estimateConversationTokens(conversation: Conversation, settings: AppSettings): number {
+  private estimateConversationTokens(
+    conversation: Conversation,
+    settings: AppSettings,
+    sceneSpeakerId?: string
+  ): number {
     // Scenes don't use the single-persona system prompt: each beat carries its
     // speaker's brief + the full roster + name-prefixing. Estimate from the actual
     // next-beat prompt so auto-compaction triggers before the window overflows.
     if (isScene(conversation)) {
       const cast = sceneCast(conversation, settings.personas)
-      const speaker = findPersona(settings.personas, nextSpeakerId(conversation, settings.personas))
+      const requestedSpeakerId =
+        sceneSpeakerId ?? nextSpeakerId(conversation, settings.personas)
+      const speaker = findPersona(settings.personas, requestedSpeakerId)
       if (speaker) {
         const beat = buildBeatPrompt({
           messages: this.liveMessages(conversation),
@@ -790,33 +797,100 @@ export class InferenceEngine extends EventEmitter {
     return total
   }
 
-  /**
-   * Snapshot how full the window is for a conversation. Reads the exact KV-cache
-   * fill when that conversation is the one resident in the session; otherwise
-   * estimates by tokenizing. Safe to call with null (returns an empty snapshot).
-   */
-  async computeUsage(conversation: Conversation | null): Promise<ContextUsage> {
+  private projectedConversation(
+    conversation: Conversation,
+    projection: ContextUsageProjection
+  ): Conversation {
+    if (projection.conversationId !== conversation.id) {
+      throw new Error('Context projection does not match the requested conversation.')
+    }
+    if (!projection.prospectiveInput) return conversation
+    const input = projection.prospectiveInput
+    return {
+      ...conversation,
+      messages: [
+        ...conversation.messages,
+        {
+          id: 'context-projection',
+          role: 'user',
+          content: input.content,
+          createdAt: '',
+          director: input.director
+        }
+      ]
+    }
+  }
+
+  private responseReserve(
+    conversation: Conversation,
+    settings: AppSettings,
+    sceneSpeakerId?: string
+  ): number {
+    if (!isScene(conversation)) {
+      if (sceneSpeakerId) throw new Error('A next speaker can only be selected for a scene.')
+      return this.generationFor(conversation, settings, undefined).maxTokens
+    }
+
+    const cast = sceneCast(conversation, settings.personas)
+    if (sceneSpeakerId) {
+      if (!conversation.cast?.includes(sceneSpeakerId)) {
+        throw new Error('The selected next speaker is not in this scene.')
+      }
+      const speaker = cast.find((persona) => persona.id === sceneSpeakerId)
+      if (!speaker) throw new Error('The selected next speaker is unavailable.')
+      return this.generationFor(conversation, settings, undefined, speaker).maxTokens
+    }
+
+    // Without a committed speaker, reserve the largest configured cast response
+    // so autoplay and manual stepping cannot underestimate the next beat.
+    return cast.length
+      ? Math.max(
+          ...cast.map(
+            (persona) => this.generationFor(conversation, settings, undefined, persona).maxTokens
+          )
+        )
+      : this.generationFor(conversation, settings, undefined).maxTokens
+  }
+
+  private async computeUsageSnapshot(
+    conversation: Conversation | null,
+    projection?: ContextUsageProjection
+  ): Promise<ContextUsage> {
     const settings = await getSettings()
     const contextSize = this.contextSize ?? 0
-    const reserve = conversation
-      ? this.generationFor(conversation, settings, undefined).maxTokens
+    const projectedConversation =
+      conversation && projection
+        ? this.projectedConversation(conversation, projection)
+        : conversation
+    const reserve = projectedConversation
+      ? this.responseReserve(projectedConversation, settings, projection?.nextSpeakerId)
       : settings.generation.maxTokens
     const { warnThreshold, compactThreshold } = settings.context
 
     let usedTokens = 0
     let exact = false
-    if (conversation && this.model) {
-      if (this.sequence && this.sessionConversationId === conversation.id) {
+    if (projectedConversation && this.model) {
+      // The live KV cache cannot represent pending input or a different scene
+      // speaker. Only use it for an unprojected snapshot of the resident thread.
+      if (
+        !projection &&
+        this.sequence &&
+        this.sessionConversationId === projectedConversation.id
+      ) {
         usedTokens = this.sequence.nextTokenIndex
         exact = true
       } else {
-        usedTokens = this.estimateConversationTokens(conversation, settings)
+        usedTokens = this.estimateConversationTokens(
+          projectedConversation,
+          settings,
+          projection?.nextSpeakerId
+        )
       }
     }
 
     const fraction = contextSize > 0 ? Math.min(1, usedTokens / contextSize) : 0
     return {
-      conversationId: conversation?.id ?? null,
+      conversationId: projectedConversation?.id ?? null,
       usedTokens,
       contextSize,
       responseReserveTokens: reserve,
@@ -825,6 +899,23 @@ export class InferenceEngine extends EventEmitter {
       willOverflow: contextSize > 0 && usedTokens + reserve > contextSize,
       exact
     }
+  }
+
+  /**
+   * Snapshot how full the window is for a conversation. Reads the exact KV-cache
+   * fill when that conversation is the one resident in the session; otherwise
+   * estimates by tokenizing. Safe to call with null (returns an empty snapshot).
+   */
+  async computeUsage(conversation: Conversation | null): Promise<ContextUsage> {
+    return this.computeUsageSnapshot(conversation)
+  }
+
+  /** Estimate a not-yet-committed request without mutating the warm session. */
+  async computeProjectedUsage(
+    conversation: Conversation,
+    projection: ContextUsageProjection
+  ): Promise<ContextUsage> {
+    return this.computeUsageSnapshot(conversation, projection)
   }
 
   private async emitUsage(conversation: Conversation | null): Promise<void> {

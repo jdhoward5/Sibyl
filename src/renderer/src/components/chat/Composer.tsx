@@ -2,6 +2,7 @@ import { useRef, useState, useEffect } from 'react'
 import { actions, useStore } from '../../store'
 import { estimateTokens, formatTokens } from '@shared/context'
 import { isScene } from '@shared/scene'
+import { rendererTurnIsBusy } from '@shared/turn'
 import { SendIcon, StopIcon, MegaphoneIcon, SpeakerIcon } from '../../lib/icons'
 
 type Mode = 'speak' | 'direct'
@@ -10,8 +11,10 @@ export function Composer() {
   const [text, setText] = useState('')
   const [mode, setMode] = useState<Mode>('speak')
   const ref = useRef<HTMLTextAreaElement>(null)
-  const generating = useStore((s) => s.engine.state === 'generating')
-  const compacting = useStore((s) => s.compacting)
+  const turnOperation = useStore((s) => s.turnOperation)
+  const busy = rendererTurnIsBusy(turnOperation)
+  const stopping = turnOperation.phase === 'stopping'
+  const generating = turnOperation.phase === 'generating' || stopping
   const hasModel = useStore((s) => Boolean(s.engine.modelId))
   const conv = useStore((s) => s.conversations.find((c) => c.id === s.activeConversationId))
   const scene = isScene(conv)
@@ -24,15 +27,21 @@ export function Composer() {
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`
   }, [text])
 
-  const submit = (): void => {
-    if (generating || compacting || !text.trim()) return
+  const submit = async (): Promise<void> => {
+    const submitted = text
+    if (busy || !submitted.trim()) return
+    let accepted: boolean
     if (scene) {
-      if (mode === 'direct') void actions.sceneDirect(text)
-      else void actions.sceneSpeak(text)
+      accepted =
+        mode === 'direct'
+          ? await actions.sceneDirect(submitted)
+          : await actions.sceneSpeak(submitted)
     } else {
-      void actions.sendMessage(text)
+      accepted = await actions.sendMessage(submitted)
     }
-    setText('')
+    if (accepted) {
+      setText((current) => (current === submitted ? '' : current))
+    }
   }
 
   const placeholder = !hasModel
@@ -83,7 +92,7 @@ export function Composer() {
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
-                submit()
+                void submit()
               }
             }}
             rows={1}
@@ -91,13 +100,18 @@ export function Composer() {
             className="no-drag selectable max-h-[220px] flex-1 resize-none bg-transparent px-2 py-1.5 text-[15px] text-sibyl-text placeholder:text-sibyl-muted/60 outline-none"
           />
           {generating ? (
-            <button onClick={() => actions.abortGeneration()} className="btn-surface h-10 w-10 shrink-0 p-0" title="Stop">
+            <button
+              onClick={() => actions.abortGeneration()}
+              disabled={stopping}
+              className="btn-surface h-10 w-10 shrink-0 p-0 disabled:opacity-40"
+              title={stopping ? 'Stopping…' : 'Stop'}
+            >
               <StopIcon size={18} />
             </button>
           ) : (
             <button
-              onClick={submit}
-              disabled={!text.trim()}
+              onClick={() => void submit()}
+              disabled={busy || !text.trim()}
               className={`h-10 w-10 shrink-0 p-0 ${scene && mode === 'direct' ? 'btn-surface' : 'btn-primary'}`}
               title={scene ? (mode === 'direct' ? 'Add director note' : 'Speak') : 'Send'}
             >

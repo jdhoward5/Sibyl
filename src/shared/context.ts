@@ -1,7 +1,19 @@
 // Pure helpers for context-window accounting and presentation.
 // No runtime deps so it is safe in the renderer and unit-testable.
 
-import type { ContextLevel } from './types'
+import type { ContextLevel, ContextUsage } from './types'
+
+/** True only when a usage response still belongs to the requested, visible thread. */
+export function contextUsageIsCurrent(
+  usage: Pick<ContextUsage, 'conversationId'> | null | undefined,
+  requestedConversationId: string | null,
+  activeConversationId: string | null
+): boolean {
+  return (
+    requestedConversationId === activeConversationId &&
+    usage?.conversationId === requestedConversationId
+  )
+}
 
 /**
  * Classify how full the context window is. `warn` and `critical` are fractions

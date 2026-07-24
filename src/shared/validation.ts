@@ -8,6 +8,7 @@ import type {
   ContextSettings,
   Conversation,
   ConversationOverrides,
+  ContextUsageProjection,
   GenerationOptions,
   GenerationProfile,
   Persona,
@@ -375,6 +376,28 @@ export function parseChatAbortRequest(value: unknown): ChatAbortRequest {
     conversationId: parseCanonicalId(v.conversationId, `${path}.conversationId`),
     messageId: parseCanonicalId(v.messageId, `${path}.messageId`),
     operationId: optional(v.operationId, (x) => parseCanonicalId(x, `${path}.operationId`))
+  }
+}
+
+export function parseContextUsageProjection(value: unknown): ContextUsageProjection {
+  const path = 'contextUsageProjection'
+  const v = object(value, path)
+  keys(v, ['conversationId', 'prospectiveInput', 'nextSpeakerId'], path)
+  let prospectiveInput: ContextUsageProjection['prospectiveInput']
+  if (v.prospectiveInput !== undefined) {
+    const input = object(v.prospectiveInput, `${path}.prospectiveInput`)
+    keys(input, ['content', 'director'], `${path}.prospectiveInput`)
+    prospectiveInput = {
+      content: string(input.content, `${path}.prospectiveInput.content`, IPC_LIMITS.message, false),
+      director: optional(input.director, (x) => bool(x, `${path}.prospectiveInput.director`))
+    }
+  }
+  return {
+    conversationId: parseCanonicalId(v.conversationId, `${path}.conversationId`),
+    prospectiveInput,
+    nextSpeakerId: optional(v.nextSpeakerId, (x) =>
+      parseCanonicalId(x, `${path}.nextSpeakerId`)
+    )
   }
 }
 

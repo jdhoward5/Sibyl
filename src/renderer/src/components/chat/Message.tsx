@@ -3,6 +3,7 @@ import type { ChatMessage, PersonaAvatar } from '@shared/types'
 import { actions, canSpeak, useStore } from '../../store'
 import { Markdown } from '../../lib/markdown'
 import { Avatar } from '../persona/Avatar'
+import { rendererTurnIsBusy } from '@shared/turn'
 import {
   CopyIcon,
   CheckIcon,
@@ -52,7 +53,7 @@ function MessageImpl({
   const [copied, setCopied] = useState(false)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
-  const generating = useStore((s) => s.engine.state === 'generating')
+  const turnBusy = useStore((s) => rendererTurnIsBusy(s.turnOperation))
   const streamStats = useStore((s) => s.streamStats)
   const showSpeak = useStore(canSpeak)
   const speaking = useStore((s) => s.speakingMessageId === message.id)
@@ -96,7 +97,7 @@ function MessageImpl({
                 setDraft(message.content)
                 setEditing(true)
               }}
-              disabled={generating}
+              disabled={turnBusy}
               className="text-sibyl-muted hover:text-sibyl-text disabled:opacity-40"
               title="Edit note"
             >
@@ -104,7 +105,7 @@ function MessageImpl({
             </button>
             <button
               onClick={() => actions.deleteMessage(message.id)}
-              disabled={generating}
+              disabled={turnBusy}
               className="text-sibyl-muted hover:text-red-300 disabled:opacity-40"
               title="Delete note"
             >
@@ -186,13 +187,13 @@ function MessageImpl({
             {copied ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
             {copied ? 'Copied' : 'Copy'}
           </button>
-          <button onClick={startEdit} disabled={generating} className={ACTION}>
+          <button onClick={startEdit} disabled={turnBusy} className={ACTION}>
             <EditIcon size={12} /> Edit
           </button>
-          <button onClick={() => actions.branchConversation(message.id)} disabled={generating} className={ACTION}>
+          <button onClick={() => actions.branchConversation(message.id)} disabled={turnBusy} className={ACTION}>
             <BranchIcon size={12} /> Branch
           </button>
-          <button onClick={() => actions.deleteMessage(message.id)} disabled={generating} className={ACTION_DANGER}>
+          <button onClick={() => actions.deleteMessage(message.id)} disabled={turnBusy} className={ACTION_DANGER}>
             <TrashIcon size={12} /> Delete
           </button>
         </div>
@@ -238,7 +239,7 @@ function MessageImpl({
             <span className="flex-1">{message.error}</span>
             <button
               onClick={() => void actions.regenerate(message.id)}
-              disabled={generating}
+              disabled={turnBusy}
               className="btn-surface shrink-0 px-2.5 py-1 text-[12px] disabled:opacity-40"
             >
               <RefreshIcon size={13} /> Retry
@@ -252,7 +253,7 @@ function MessageImpl({
             <span className="flex-1">Stopped — partial response kept</span>
             <button
               onClick={() => void actions.regenerate(message.id)}
-              disabled={generating}
+              disabled={turnBusy}
               className="btn-surface shrink-0 px-2.5 py-1 text-[12px] disabled:opacity-40"
             >
               <RefreshIcon size={13} /> Retry
@@ -285,14 +286,14 @@ function MessageImpl({
               </button>
             )}
             {isLast && !message.error && (
-              <button onClick={() => void actions.regenerate(message.id)} disabled={generating} className={ACTION}>
+              <button onClick={() => void actions.regenerate(message.id)} disabled={turnBusy} className={ACTION}>
                 <RefreshIcon size={12} /> Regenerate
               </button>
             )}
-            <button onClick={() => actions.branchConversation(message.id)} disabled={generating} className={ACTION}>
+            <button onClick={() => actions.branchConversation(message.id)} disabled={turnBusy} className={ACTION}>
               <BranchIcon size={12} /> Branch
             </button>
-            <button onClick={() => actions.deleteMessage(message.id)} disabled={generating} className={ACTION_DANGER}>
+            <button onClick={() => actions.deleteMessage(message.id)} disabled={turnBusy} className={ACTION_DANGER}>
               <TrashIcon size={12} /> Delete
             </button>
             {message.stats && (

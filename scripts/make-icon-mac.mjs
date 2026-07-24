@@ -9,7 +9,7 @@
 //
 // (wrapped by `npm run make-icon:mac`).
 
-import { app, BrowserWindow, nativeImage } from 'electron'
+import { app, BrowserWindow } from 'electron'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
