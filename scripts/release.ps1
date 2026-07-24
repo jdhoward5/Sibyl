@@ -38,6 +38,12 @@ if ($KeepReleases -lt 1) { throw "-KeepReleases must be >= 1 (got $KeepReleases)
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 
+function Assert-LastExitCode([string]$step) {
+  if ($LASTEXITCODE -ne 0) {
+    throw "$step failed with exit code $LASTEXITCODE."
+  }
+}
+
 if (-not $DryRun -and -not (Get-Command gh -ErrorAction SilentlyContinue)) {
   throw "GitHub CLI (gh) not found on PATH. Install it (and 'gh auth login') or pass -DryRun."
 }
@@ -53,17 +59,42 @@ if (git status --porcelain) {
 
 Write-Host "==> Typecheck + unit tests"
 npm run typecheck
+Assert-LastExitCode 'Typecheck'
 npm test
+Assert-LastExitCode 'Unit tests'
 
 if ($SkipSmoke) {
   Write-Warning "Skipping GPU smoke (-SkipSmoke). The installer will not be verified on a real GPU."
 } else {
   Write-Host "==> GPU smoke (downloads a tiny model, loads on GPU, streams a reply)"
   npm run smoke
+  Assert-LastExitCode 'GPU smoke'
 }
 
-Write-Host "==> Building Squirrel installer + update package (electron-builder --dir + electron-winstaller)"
-npm run dist
+# electron-builder's matcher does not reliably descend dot-directories, so its
+# `.smoke-models` exclusion is not enough. Relocate the GGUF cache outside the
+# project while packaging, then restore it even when the build fails.
+$smokeCache = Join-Path (Get-Location) '.smoke-models'
+$stashedSmokeCache = $null
+if (Test-Path -LiteralPath $smokeCache) {
+  $stashedSmokeCache = Join-Path ([IO.Path]::GetTempPath()) "sibyl-smoke-models-$([guid]::NewGuid().ToString('N'))"
+  Move-Item -LiteralPath $smokeCache -Destination $stashedSmokeCache
+  Write-Host "==> Moved the smoke-model cache outside the package root"
+}
+
+try {
+  Write-Host "==> Building Squirrel installer + update package (electron-builder --dir + electron-winstaller)"
+  npm run dist
+  Assert-LastExitCode 'Windows distribution build'
+} finally {
+  if ($stashedSmokeCache) {
+    if (Test-Path -LiteralPath $smokeCache) {
+      throw "Cannot restore the smoke-model cache because $smokeCache already exists."
+    }
+    Move-Item -LiteralPath $stashedSmokeCache -Destination $smokeCache
+    Write-Host "==> Restored the smoke-model cache"
+  }
+}
 
 # The native (Squirrel) updater reads these straight from the *latest* GitHub
 # release: RELEASES (manifest) + the full .nupkg (update payload). SibylSetup.exe
@@ -88,12 +119,15 @@ if ($DryRun) {
 # installer + update metadata attached.
 if (-not (git tag --list $tag)) {
   git tag -a $tag -m "Sibyl $tag"
+  Assert-LastExitCode 'Create release tag'
 }
 git push origin $tag
+Assert-LastExitCode 'Push release tag'
 
 # Squirrel's feed (releases/latest/download/RELEASES) resolves to the release
 # GitHub marks "Latest", so a Squirrel release must always be published --latest.
 gh release create $tag @assets --latest --generate-notes --title "Sibyl $tag"
+Assert-LastExitCode 'Publish GitHub release'
 Write-Host "==> Published release $tag" -ForegroundColor Green
 
 # Auto-prune: keep only the $KeepReleases most recent releases online; delete the
