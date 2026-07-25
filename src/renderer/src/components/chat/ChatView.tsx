@@ -2,8 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Conversation, Persona } from '@shared/types'
 import { actions, useStore } from '../../store'
 import { formatTokens } from '@shared/context'
-import { findPersona } from '@shared/personas'
+import { resolveConversationPersona } from '@shared/roleplay'
 import { isScene, sceneCast, nextSpeakerId } from '@shared/scene'
+import { sceneRunStopLabel } from '@shared/sceneRun'
 import { rendererTurnIsBusy } from '@shared/turn'
 import { ConversationList } from './ConversationList'
 import { Message } from './Message'
@@ -27,7 +28,10 @@ import {
   PlayIcon,
   PauseIcon,
   StepForwardIcon,
-  UsersIcon
+  UsersIcon,
+  StopIcon,
+  RefreshIcon,
+  SpeakerIcon
 } from '../../lib/icons'
 
 /** Banner shown when the next reply may not fit the remaining context window. */
@@ -272,8 +276,9 @@ function CastChip({
       </button>
       <button
         onClick={onRemove}
+        disabled={disabled}
         title="Remove from scene"
-        className="no-drag -mr-0.5 text-sibyl-muted opacity-0 transition-opacity hover:text-red-300 group-hover/chip:opacity-100"
+        className="no-drag -mr-0.5 text-sibyl-muted opacity-0 transition-opacity hover:text-red-300 disabled:cursor-not-allowed group-hover/chip:opacity-100"
       >
         <XIcon size={12} />
       </button>
@@ -282,7 +287,7 @@ function CastChip({
 }
 
 /** Dropdown to add another persona to the cast. */
-function AddCastMenu({ conversation }: { conversation: Conversation }) {
+function AddCastMenu({ conversation, disabled }: { conversation: Conversation; disabled: boolean }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const personas = useStore((s) => s.settings?.personas ?? [])
@@ -300,8 +305,9 @@ function AddCastMenu({ conversation }: { conversation: Conversation }) {
     <div ref={ref} className="relative shrink-0">
       <button
         onClick={() => setOpen((o) => !o)}
+        disabled={disabled}
         title="Add a character"
-        className="no-drag flex h-8 w-8 items-center justify-center rounded-full border border-dashed border-sibyl-border text-sibyl-muted transition-colors hover:border-sibyl-accent/50 hover:text-sibyl-accent"
+        className="no-drag flex h-8 w-8 items-center justify-center rounded-full border border-dashed border-sibyl-border text-sibyl-muted transition-colors hover:border-sibyl-accent/50 hover:text-sibyl-accent disabled:cursor-not-allowed disabled:opacity-40"
       >
         <PlusIcon size={15} />
       </button>
@@ -346,15 +352,31 @@ function SceneStrip({
   onThreadSettings: () => void
 }) {
   const personas = useStore((s) => s.settings?.personas ?? [])
-  const playing = useStore((s) => s.scenePlay?.convId === conversation.id)
+  const run = useStore((s) => (s.scenePlay?.convId === conversation.id ? s.scenePlay : null))
+  const playing = run?.status === 'running'
   const busy = useStore((s) => rendererTurnIsBusy(s.turnOperation))
   const hasModel = useStore((s) => Boolean(s.engine.modelId))
+  const [clock, setClock] = useState(Date.now())
   const cast = sceneCast(conversation, personas)
   const nextId = nextSpeakerId(conversation, personas)
   const nextName = cast.find((c) => c.id === nextId)?.name.split(/\s+/)[0]
+  const elapsedSeconds = run ? Math.max(0, Math.round((clock - run.startedAt) / 1_000)) : 0
+  const deadlineSeconds = run ? Math.round((run.deadlineAt - run.startedAt) / 1_000) : 0
+  const runLabel = sceneRunStopLabel(run?.stopReason)
+  const runConvId = run?.convId
+  const runStartedAt = run?.startedAt
+  const runStatus = run?.status
+
+  useEffect(() => {
+    setClock(Date.now())
+    if (!runConvId || runStatus !== 'running') return
+    const timer = setInterval(() => setClock(Date.now()), 1_000)
+    return () => clearInterval(timer)
+  }, [runConvId, runStartedAt, runStatus])
 
   return (
-    <div className="flex shrink-0 items-center gap-3 border-b border-sibyl-border/60 px-3.5 py-2.5">
+    <div className="shrink-0 border-b border-sibyl-border/60">
+      <div className="flex items-center gap-3 px-3.5 py-2.5">
       <UsersIcon size={16} className="shrink-0 text-sibyl-accent-2" />
       <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto py-0.5">
         {cast.map((p) => (
@@ -367,26 +389,62 @@ function SceneStrip({
             onRemove={() => actions.removeCastMember(p.id)}
           />
         ))}
-        <AddCastMenu conversation={conversation} />
+        <AddCastMenu conversation={conversation} disabled={busy || playing} />
       </div>
 
       <div className="flex shrink-0 items-center gap-1.5 border-l border-sibyl-border/60 pl-2.5">
-        <button
-          onClick={() => actions.toggleScenePlay()}
-          disabled={!hasModel || cast.length < 2 || (busy && !playing)}
-          className={`no-drag flex h-8 items-center gap-1.5 rounded-md px-2.5 text-[12.5px] font-semibold transition-colors disabled:opacity-40 ${
-            playing
-              ? 'bg-sibyl-accent/15 text-sibyl-accent'
-              : 'btn-surface'
-          }`}
-          title={playing ? 'Pause the scene' : 'Play the scene (auto-advance)'}
-        >
-          {playing ? <PauseIcon size={14} /> : <PlayIcon size={14} />}
-          {playing ? 'Pause' : 'Play'}
-        </button>
+        {run?.status === 'narration-error' ? (
+          <>
+            <button
+              onClick={() => actions.retrySceneNarration()}
+              className="btn-surface no-drag h-8 px-2.5 text-[12px]"
+              title="Retry the failed narration without regenerating this beat"
+            >
+              <RefreshIcon size={13} /> Retry narration
+            </button>
+            <button
+              onClick={() => actions.continueSceneMuted()}
+              className="btn-ghost no-drag h-8 px-2.5 text-[12px]"
+              title="Continue this run without speech"
+            >
+              <SpeakerIcon size={13} /> Continue muted
+            </button>
+          </>
+        ) : (
+          <button
+            onClick={() => actions.toggleScenePlay()}
+            disabled={!hasModel || cast.length < 2 || (busy && !playing && run?.status !== 'paused')}
+            className={`no-drag flex h-8 items-center gap-1.5 rounded-md px-2.5 text-[12.5px] font-semibold transition-colors disabled:opacity-40 ${
+              playing
+                ? 'bg-sibyl-accent/15 text-sibyl-accent'
+                : 'btn-surface'
+            }`}
+            title={playing ? 'Pause after the current beat or narration' : 'Run six bounded scene beats'}
+          >
+            {playing ? <PauseIcon size={14} /> : <PlayIcon size={14} />}
+            {run?.pauseAfterCurrent
+              ? 'Pausing…'
+              : playing
+                ? 'Pause'
+                : run?.status === 'paused'
+                  ? 'Resume'
+                  : run?.status === 'stopped'
+                    ? 'Continue +6'
+                    : 'Play 6'}
+          </button>
+        )}
+        {run && run.status !== 'stopped' && (
+          <button
+            onClick={() => actions.stopScenePlay('manual-stop', true)}
+            className="btn-ghost no-drag h-8 w-8 p-0"
+            title="Stop this run and abort the active scene operation"
+          >
+            <StopIcon size={14} />
+          </button>
+        )}
         <button
           onClick={() => void actions.advanceScene()}
-          disabled={!hasModel || busy || playing || cast.length < 2}
+          disabled={!hasModel || busy || playing || run?.status === 'narration-error' || cast.length < 2}
           className="btn-ghost no-drag h-8 w-8 p-0 disabled:opacity-40"
           title={nextName ? `Advance — ${nextName} speaks next` : 'Advance one beat'}
         >
@@ -399,6 +457,25 @@ function SceneStrip({
         <ContextMeter />
         <HeaderMenu hasOverrides={Boolean(conversation.overrides)} onFind={onFind} onThreadSettings={onThreadSettings} />
       </div>
+      </div>
+      {run && (
+        <div className="flex items-center justify-between gap-4 border-t border-sibyl-border/40 bg-sibyl-surface/30 px-4 py-1.5 text-[10.5px] text-sibyl-muted">
+          <span className={runLabel && !playing ? 'text-amber-300' : ''}>
+            {run.narrationError ||
+              runLabel ||
+              run.lastDirectorIntent ||
+              (run.lastDirectorFallback
+                ? `Director fallback: ${run.lastDirectorFallback}`
+                : 'Bounded scene run in progress')}
+          </span>
+          <span className="shrink-0 font-mono">
+            {run.remainingBeats} beats remaining · {elapsedSeconds}s/{deadlineSeconds}s ·{' '}
+            {formatTokens(run.completionTokensUsed)}/{formatTokens(run.completionTokenBudget)} completion tokens
+            {conversation.director?.enabled &&
+              ` · ${formatTokens(run.directorTokensUsed)}/${formatTokens(run.directorTokenBudget)} director tokens`}
+          </span>
+        </div>
+      )}
     </div>
   )
 }
@@ -422,12 +499,20 @@ export function ChatView() {
   const messages = conversation?.messages ?? []
   const lastLen = messages[messages.length - 1]?.content.length ?? 0
 
-  const persona = findPersona(personas, conversation?.personaId)
+  const persona = conversation
+    ? resolveConversationPersona(conversation, conversation.personaId, personas)
+    : null
   const speaker = persona ? persona.name.split(/\s+/)[0] : 'Sibyl'
   const scene = isScene(conversation)
   // O(1) per-beat speaker lookup instead of a linear scan per message per render
   // (ChatView re-renders on every streamed token).
-  const personaById = useMemo(() => new Map(personas.map((p) => [p.id, p])), [personas])
+  const personaById = useMemo(() => {
+    const map = new Map(personas.map((p) => [p.id, p]))
+    for (const snapshot of conversation?.castSnapshots ?? []) {
+      map.set(snapshot.sourcePersonaId, snapshot.persona)
+    }
+    return map
+  }, [personas, conversation?.castSnapshots])
 
   // The picker takes over the column when explicitly opened, or when there's no
   // active thread to show.

@@ -15,8 +15,8 @@ export default {
           'surface-2': '#141416', // raised
           sunken: '#050506',
           border: '#23232a',
-          muted: '#7a7a85',
-          faint: '#4a4a52',
+          muted: '#9696a3',
+          faint: '#868692',
           secondary: '#b8b8c0',
           text: '#f5f5f7',
           // Accent trio is driven by CSS variables (set per accent theme) so a

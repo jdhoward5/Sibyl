@@ -1,160 +1,52 @@
 #!/usr/bin/env pwsh
-# Cut an Sibyl release locally, by hand, on the GPU dev box.
-#
-# We deliberately do NOT use a self-hosted GitHub Actions runner: that would
-# leave a GitHub-triggered build daemon running on a machine that holds your
-# SSH key + HF token. Releases are infrequent, so we cut them manually instead.
-# This script verifies, builds the Squirrel installer + update package (with the
-# custom CUDA backend), and publishes them as the latest GitHub release. The
-# in-app updater (Electron's native/Squirrel autoUpdater) reads RELEASES + the
-# .nupkg straight from the latest release — no server, no electron-updater.
-#
-# Prereqs on this machine: the CUDA Toolkit + VS Build Tools (for rebuild:llama),
-# node_modules installed, and an authenticated `gh` CLI.
-#
-#   pwsh -File scripts/release.ps1                  # tests + GPU smoke + dist + publish
-#   pwsh -File scripts/release.ps1 -SkipSmoke       # skip the GPU smoke gate
-#   pwsh -File scripts/release.ps1 -DryRun          # build only; no tag, no publish
-#   pwsh -File scripts/release.ps1 -KeepReleases 3  # keep 3 newest releases (default 2)
-#   pwsh -File scripts/release.ps1 -CleanupTags     # also delete the git tags of pruned releases
-#   pwsh -File scripts/release.ps1 -NoPrune         # skip the auto-prune step
+# Build and optionally publish a Windows x64 Sibyl release. The build happens in
+# a disposable detached worktree with npm ci; custom b9616 binaries are imported
+# from this audited GPU host. Platform binaries remain unsigned.
 param(
   [switch]$SkipSmoke,
   [switch]$DryRun,
-  # Accepted for back-compat; no-op now — Squirrel releases always publish as the
-  # latest release (the feed resolves to GitHub's "Latest").
-  [switch]$Stable,
-  # After a successful publish, keep only this many of the most recent releases
-  # online and delete the rest. The updater only reads the newest release's
-  # RELEASES + .nupkg, so old releases are just storage. Must be >= 1.
-  [int]$KeepReleases = 2,
-  # Also delete the git tags of the releases that get pruned (local + remote).
-  # Off by default — tags are cheap and let you re-cut an old version.
-  [switch]$CleanupTags,
-  # Skip the auto-prune step entirely (leave every release online).
-  [switch]$NoPrune
+  [switch]$ReplaceOutput
 )
-if ($KeepReleases -lt 1) { throw "-KeepReleases must be >= 1 (got $KeepReleases)." }
+
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 
-function Assert-LastExitCode([string]$step) {
-  if ($LASTEXITCODE -ne 0) {
-    throw "$step failed with exit code $LASTEXITCODE."
-  }
+if (-not $DryRun -and -not (Get-Command gh -ErrorAction SilentlyContinue)) {
+  throw "GitHub CLI (gh) not found. Install it and authenticate, or pass -DryRun."
 }
 
-if (-not $DryRun -and -not (Get-Command gh -ErrorAction SilentlyContinue)) {
-  throw "GitHub CLI (gh) not found on PATH. Install it (and 'gh auth login') or pass -DryRun."
-}
+$buildArgs = @('scripts/clean-release-build.mjs')
+if ($SkipSmoke) { $buildArgs += '--skip-smoke' }
+if ($ReplaceOutput) { $buildArgs += '--replace-output' }
+node @buildArgs
+if ($LASTEXITCODE -ne 0) { throw "Clean Windows release build failed." }
 
 $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-$tag = "v$version"
-Write-Host "==> Releasing $tag" -ForegroundColor Cyan
-
-# The published binary must correspond to the commit we tag, so refuse a dirty tree.
-if (git status --porcelain) {
-  throw "Working tree is dirty. Commit or stash changes before releasing."
-}
-
-Write-Host "==> Typecheck + unit tests"
-npm run typecheck
-Assert-LastExitCode 'Typecheck'
-npm test
-Assert-LastExitCode 'Unit tests'
-
-if ($SkipSmoke) {
-  Write-Warning "Skipping GPU smoke (-SkipSmoke). The installer will not be verified on a real GPU."
-} else {
-  Write-Host "==> GPU smoke (downloads a tiny model, loads on GPU, streams a reply)"
-  npm run smoke
-  Assert-LastExitCode 'GPU smoke'
-}
-
-# electron-builder's matcher does not reliably descend dot-directories, so its
-# `.smoke-models` exclusion is not enough. Relocate the GGUF cache outside the
-# project while packaging, then restore it even when the build fails.
-$smokeCache = Join-Path (Get-Location) '.smoke-models'
-$stashedSmokeCache = $null
-if (Test-Path -LiteralPath $smokeCache) {
-  $stashedSmokeCache = Join-Path ([IO.Path]::GetTempPath()) "sibyl-smoke-models-$([guid]::NewGuid().ToString('N'))"
-  Move-Item -LiteralPath $smokeCache -Destination $stashedSmokeCache
-  Write-Host "==> Moved the smoke-model cache outside the package root"
-}
-
-try {
-  Write-Host "==> Building Squirrel installer + update package (electron-builder --dir + electron-winstaller)"
-  npm run dist
-  Assert-LastExitCode 'Windows distribution build'
-} finally {
-  if ($stashedSmokeCache) {
-    if (Test-Path -LiteralPath $smokeCache) {
-      throw "Cannot restore the smoke-model cache because $smokeCache already exists."
-    }
-    Move-Item -LiteralPath $stashedSmokeCache -Destination $smokeCache
-    Write-Host "==> Restored the smoke-model cache"
+$root = "release/$version"
+$assets = @(
+  "$root/squirrel/SibylSetup.exe",
+  "$root/squirrel/Sibyl-$version-full.nupkg",
+  "$root/squirrel/RELEASES",
+  "$root/release-manifest-win-x64.json",
+  "$root/release-manifest-win-x64.sig",
+  "$root/sbom-win-x64.cdx.json",
+  "$root/package-inventory-win-x64.json",
+  "$root/SHA256SUMS-win-x64"
+)
+foreach ($asset in $assets) {
+  if (-not (Test-Path -LiteralPath $asset)) {
+    throw "Expected verified release asset not found: $asset"
   }
 }
 
-# The native (Squirrel) updater reads these straight from the *latest* GitHub
-# release: RELEASES (manifest) + the full .nupkg (update payload). SibylSetup.exe
-# is the first-time installer for the website download.
-$squirrelDir = "release/$version/squirrel"
-$setup    = "$squirrelDir/SibylSetup.exe"
-$nupkg    = "$squirrelDir/Sibyl-$version-full.nupkg"
-$releases = "$squirrelDir/RELEASES"
-foreach ($f in @($setup, $nupkg, $releases)) {
-  if (-not (Test-Path $f)) { throw "Expected Squirrel artifact not found: $f" }
-}
-Write-Host "==> Built $setup" -ForegroundColor Green
-$assets = @($setup, $nupkg, $releases)
+$publishArgs = @('scripts/publish-release-assets.mjs')
+foreach ($asset in $assets) { $publishArgs += @('--asset', $asset) }
+if ($DryRun) { $publishArgs += '--dry-run' }
+node @publishArgs
+if ($LASTEXITCODE -ne 0) { throw "Collision-safe release publishing failed." }
 
 if ($DryRun) {
-  Write-Host "==> -DryRun: built but not tagging or publishing." -ForegroundColor Yellow
-  Write-Host "    Would attach: $($assets -join ', ')"
-  return
-}
-
-# Tag this commit (idempotent) and publish the latest stable release with the
-# installer + update metadata attached.
-if (-not (git tag --list $tag)) {
-  git tag -a $tag -m "Sibyl $tag"
-  Assert-LastExitCode 'Create release tag'
-}
-git push origin $tag
-Assert-LastExitCode 'Push release tag'
-
-# Squirrel's feed (releases/latest/download/RELEASES) resolves to the release
-# GitHub marks "Latest", so a Squirrel release must always be published --latest.
-gh release create $tag @assets --latest --generate-notes --title "Sibyl $tag"
-Assert-LastExitCode 'Publish GitHub release'
-Write-Host "==> Published release $tag" -ForegroundColor Green
-
-# Auto-prune: keep only the $KeepReleases most recent releases online; delete the
-# rest (release page + assets). The updater only consults the newest release's
-# RELEASES + full .nupkg, so older releases are dead storage. Best-effort —
-# the release already published, so a prune failure must not fail the script.
-if (-not $NoPrune) {
-  try {
-    $releases = gh release list --limit 100 --json tagName,createdAt |
-      ConvertFrom-Json |
-      Sort-Object { [datetime]$_.createdAt } -Descending
-    $stale = @($releases | Select-Object -Skip $KeepReleases)
-    if ($stale.Count -eq 0) {
-      Write-Host "==> Nothing to prune ($($releases.Count) release(s) <= keep $KeepReleases)."
-    } else {
-      foreach ($r in $stale) {
-        Write-Host "==> Pruning old release $($r.tagName)"
-        if ($CleanupTags) {
-          gh release delete $r.tagName --yes --cleanup-tag
-        } else {
-          gh release delete $r.tagName --yes
-        }
-      }
-      $tagNote = if ($CleanupTags) { ' (and their tags)' } else { '' }
-      Write-Host "==> Pruned $($stale.Count) old release(s)$tagNote; kept the $KeepReleases most recent." -ForegroundColor Green
-    }
-  } catch {
-    Write-Warning "Auto-prune failed (the release itself published fine): $_"
-  }
+  Write-Host "Verified unsigned Windows release built; no tag or asset was published." -ForegroundColor Yellow
+} else {
+  Write-Host "Published verified unsigned Windows release v$version." -ForegroundColor Green
 }

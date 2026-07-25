@@ -1,10 +1,13 @@
 import { actions, useStore } from '../../store'
 import { formatBytes } from '@shared/format'
 import { CheckIcon, TrashIcon, FolderIcon, BoxIcon, CompassIcon, PlusIcon } from '../../lib/icons'
+import { estimateModelFit } from '@shared/hardwareFit'
 
 export function ModelsView() {
   const models = useStore((s) => s.installedModels)
   const engine = useStore((s) => s.engine)
+  const settings = useStore((s) => s.settings)
+  const appInfo = useStore((s) => s.appInfo)
   const totalBytes = models.reduce((sum, m) => sum + m.sizeBytes, 0)
 
   return (
@@ -59,6 +62,22 @@ export function ModelsView() {
                   ]
                     .filter(Boolean)
                     .join(' · ')
+                  const fit =
+                    settings && appInfo
+                      ? estimateModelFit({
+                          model: m,
+                          contextSize: settings.load.contextSize,
+                          gpuLayers: settings.load.gpuLayers,
+                          gpuEnabled:
+                            settings.gpu !== 'cpu' && settings.load.gpuLayers !== 0,
+                          resources: {
+                            systemMemoryTotalBytes: appInfo.systemMemoryTotalBytes,
+                            systemMemoryFreeBytes: appInfo.systemMemoryFreeBytes,
+                            vramTotalBytes: engine.vramTotalBytes,
+                            vramUsedBytes: engine.vramUsedBytes
+                          }
+                        })
+                      : null
                   return (
                     <div
                       key={m.id}
@@ -103,6 +122,23 @@ export function ModelsView() {
                           )}
                         </div>
                         <div className="mt-1.5 truncate font-mono text-[11px] text-sibyl-muted">{meta}</div>
+                        {fit && (
+                          <div
+                            className={`mt-1 text-[11px] ${
+                              fit.severity === 'infeasible'
+                                ? 'text-red-300'
+                                : fit.severity === 'tight'
+                                  ? 'text-amber-300'
+                                  : 'text-sibyl-muted'
+                            }`}
+                            title={fit.details.join('\n')}
+                          >
+                            {fit.summary} · RAM{' '}
+                            {formatBytes(fit.estimatedRamBytes)}
+                            {fit.offloadFraction > 0 &&
+                              ` · VRAM ${formatBytes(fit.estimatedVramBytes)}`}
+                          </div>
+                        )}
                       </div>
                       {isLoaded ? (
                         <button onClick={() => void actions.unloadModel()} className="btn-surface h-[34px]">

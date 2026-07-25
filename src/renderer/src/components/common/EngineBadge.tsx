@@ -11,7 +11,7 @@ export function EngineBadge() {
   const isGpu = gpu === 'cuda' || gpu === 'vulkan' || gpu === 'metal'
 
   if (engine.state === 'idle' && !engine.modelId) {
-    return <span className="no-drag text-[11px] text-sibyl-muted/70">No model loaded</span>
+    return <span className="no-drag text-[11px] text-sibyl-muted">No model loaded</span>
   }
 
   return (
@@ -42,7 +42,7 @@ export function EngineBadge() {
         </span>
       )}
       {engine.contextSize != null && (
-        <span className="text-sibyl-muted/70" title="Context window">
+        <span className="text-sibyl-muted" title="Context window">
           {(engine.contextSize / 1024).toFixed(0)}K ctx
         </span>
       )}

@@ -76,6 +76,40 @@ describe('scene attribution', () => {
     expect(md).toContain('**You:**')
     expect(md).not.toContain('**Sibyl:**')
   })
+
+  it('labels public and character-private segments explicitly', () => {
+    const privateScene: Conversation = {
+      ...scene,
+      messages: [
+        {
+          id: 'private',
+          role: 'assistant',
+          content: 'Combined display text',
+          createdAt: '',
+          speakerId: 'a',
+          speakerName: 'Ada',
+          segments: [
+            {
+              id: 'spoken',
+              kind: 'dialogue',
+              content: 'I hold the line.',
+              visibility: { kind: 'public' }
+            },
+            {
+              id: 'thought',
+              kind: 'thought',
+              content: 'Ada plans to flee.',
+              visibility: { kind: 'private', characterIds: ['a'] }
+            }
+          ]
+        }
+      ]
+    }
+    const md = conversationToMarkdown(privateScene)
+    expect(md).toContain('**[Public]**')
+    expect(md).toContain('**[Private → a]**')
+    expect(md).toContain('Ada plans to flee.')
+  })
 })
 
 describe('conversationToText', () => {

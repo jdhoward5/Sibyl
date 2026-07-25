@@ -21,7 +21,7 @@ export function TitleBar() {
         </div>
         <span className="text-[13px] font-semibold tracking-wide text-sibyl-text">Sibyl</span>
         {appInfo && (
-          <span className="text-[11px] text-sibyl-muted/70">v{appInfo.version}</span>
+          <span className="text-[11px] text-sibyl-muted">v{appInfo.version}</span>
         )}
       </div>
       <EngineBadge />

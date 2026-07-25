@@ -108,6 +108,28 @@ export interface StorageIssue {
   recoverable: boolean
 }
 
+export type PrivateVaultState = 'uninitialized' | 'locked' | 'unlocked' | 'error'
+
+/** Renderer-safe vault lifecycle state. Contains no private data or key material. */
+export interface PrivateVaultStatus {
+  state: PrivateVaultState
+  hasDeviceSlot: boolean
+  hasPasskeySlot: boolean
+  recoveryAvailable: boolean
+  deviceStorageAvailable: boolean
+  passkeyAvailable: boolean
+  migrationRequired: boolean
+  error?: string
+}
+
+/** Opaque, content-free summary of an encrypted local vault snapshot. */
+export interface PrivateVaultBackup {
+  id: string
+  createdAt: string
+  recordCount: number
+  valid: boolean
+}
+
 export interface ChatMessage {
   id: string
   role: 'system' | 'user' | 'assistant'
@@ -136,6 +158,21 @@ export interface ChatMessage {
    * and fed to every character as guidance, not as spoken dialogue.
    */
   director?: boolean
+  /** Structured public/private content. When absent, legacy `content` is public. */
+  segments?: MessageSegment[]
+  /** Links a rendered director note to its independently managed direction. */
+  directionId?: string
+}
+
+export type KnowledgeVisibility =
+  | { kind: 'public' }
+  | { kind: 'private'; characterIds: string[] }
+
+export interface MessageSegment {
+  id: string
+  kind: 'dialogue' | 'action' | 'thought' | 'note'
+  content: string
+  visibility: KnowledgeVisibility
 }
 
 export interface GenerationStats {
@@ -193,6 +230,10 @@ export interface PersonaAvatar {
  * sampling defaults. A conversation references one via `personaId`.
  */
 export interface Persona {
+  /** Forward-only persona schema. */
+  schemaVersion?: 2
+  /** Monotonic library revision; snapshots retain the revision they captured. */
+  version?: number
   id: string
   name: string
   /** One-line role subtitle, e.g. "Caravan guard". */
@@ -206,6 +247,120 @@ export interface Persona {
   voiceTags: string[]
   /** Per-persona sampling defaults; falls back to the global generation options. */
   generation?: GenerationOptions
+  /** Information every participant may know. */
+  publicDescription?: string
+  /** Goals visible only to this character's prompt and the human. */
+  privateMotivations?: string[]
+  /** Facts visible only to this character's prompt and the human. */
+  secrets?: string[]
+  behavioralConstraints?: string[]
+  speechGuidance?: string
+  relationships?: PersonaRelationship[]
+  voice?: PersonaVoice
+}
+
+export interface CompactionResult {
+  compaction: CompactionInfo
+  /** Validated public facts extracted during roleplay maintenance. */
+  roleplayFacts?: RoleplayFact[]
+}
+
+export interface PersonaRelationship {
+  personaId: string
+  summary: string
+  visibility: 'public' | 'private'
+}
+
+export interface PersonaVoice {
+  voiceId?: string
+  rate?: number
+}
+
+/** Prompt-critical identity frozen into a conversation. */
+export interface PersonaSnapshot {
+  schemaVersion: 1
+  sourcePersonaId: string
+  sourceVersion: number
+  capturedAt: string
+  persona: Persona
+}
+
+export interface ScenePersonaOverride {
+  personaId: string
+  publicDescription?: string
+  privateMotivations?: string[]
+  secrets?: string[]
+  behavioralConstraints?: string[]
+  speechGuidance?: string
+  relationships?: PersonaRelationship[]
+  voice?: PersonaVoice
+}
+
+export interface RoleplayFact {
+  id: string
+  category:
+    | 'time'
+    | 'location'
+    | 'object'
+    | 'condition'
+    | 'obligation'
+    | 'relationship'
+    | 'plot'
+    | 'goal'
+    | 'other'
+  text: string
+  visibility: KnowledgeVisibility
+  provenanceMessageIds: string[]
+  userAuthored: boolean
+  pinned: boolean
+  updatedAt: string
+}
+
+export interface RoleplayState {
+  schemaVersion: 1
+  /** Compact prose representation used in prompts. */
+  recap?: string
+  facts: RoleplayFact[]
+  /** Number of successful beats since the last maintenance pass. */
+  beatsSinceMaintenance: number
+  maintainedAt?: string
+}
+
+export type DirectionScope = 'next-beat' | 'until-resolved' | 'persistent' | 'scene-metadata'
+
+export interface SceneDirection {
+  id: string
+  content: string
+  target: { kind: 'cast' } | { kind: 'speaker'; speakerId: string }
+  scope: DirectionScope
+  enabled: boolean
+  createdAt: string
+  /** Set only after the influenced beat was durably saved. */
+  consumedAt?: string
+  consumedByMessageId?: string
+  resolvedAt?: string
+}
+
+export interface SceneDirectorSettings {
+  enabled: boolean
+  useModel: boolean
+  sceneGoal?: string
+  pacing: 'slow' | 'balanced' | 'fast'
+  initiative: 'low' | 'balanced' | 'high'
+  interruption: 'never' | 'natural-pauses' | 'often'
+  inspectIntent: boolean
+}
+
+export interface SceneDirectorDecision {
+  action: 'continue' | 'pause' | 'end'
+  speakerId?: string
+  /** Private and ephemeral unless inspectIntent is enabled. */
+  intent: string
+  usedModel: boolean
+  fallbackReason?: string
+  promptTokens: number
+  completionTokens: number
+  durationMs: number
 }
 
 /** The writer's own character, injected into the prompt as "The user plays …". */
@@ -215,6 +370,8 @@ export interface UserCharacter {
 }
 
 export interface Conversation {
+  /** Forward-only conversation schema. Missing means legacy v1. */
+  schemaVersion?: 2
   id: string
   title: string
   modelId: string | null
@@ -227,6 +384,8 @@ export interface Conversation {
   overrides?: ConversationOverrides
   /** The persona (from `settings.personas`) this thread is written with, if any. */
   personaId?: string
+  /** Frozen identity for an ordinary single-persona thread. */
+  personaSnapshot?: PersonaSnapshot
   /** The writer's own character for this thread (optional). */
   userCharacter?: UserCharacter
   /**
@@ -236,6 +395,17 @@ export interface Conversation {
    * direct. Empty/absent ⇒ an ordinary single-persona thread.
    */
   cast?: string[]
+  /** Frozen cast identities, in cast order. */
+  castSnapshots?: PersonaSnapshot[]
+  /** Per-scene changes that do not mutate the reusable persona library. */
+  personaOverrides?: ScenePersonaOverride[]
+  /** Public-only is a compatibility mode for small models. */
+  knowledgeMode?: 'scoped' | 'public-only'
+  roleplayState?: RoleplayState
+  directions?: SceneDirection[]
+  director?: SceneDirectorSettings
+  /** Scene-wide speech fallback between a character override and global TTS. */
+  sceneVoice?: PersonaVoice
   /** Optional one-line premise/setting shown to every character in a scene. */
   scenePremise?: string
 }
@@ -335,6 +505,19 @@ export const DEFAULT_CONTEXT_SETTINGS: ContextSettings = {
   summaryTokenFraction: 0.06
 }
 
+export interface AccessibilitySettings {
+  reducedMotion: boolean
+  highContrast: boolean
+  /** Root UI scale; 1.25 is the supported large-text mode. */
+  textScale: 1 | 1.125 | 1.25
+}
+
+export const DEFAULT_ACCESSIBILITY_SETTINGS: AccessibilitySettings = {
+  reducedMotion: false,
+  highContrast: false,
+  textScale: 1
+}
+
 export interface AppSettings {
   /** Directory where GGUF models are stored. */
   modelsDir: string
@@ -369,6 +552,9 @@ export interface AppSettings {
   generationProfiles: GenerationProfile[]
   /** On-device text-to-speech (Piper) preferences. */
   tts: TtsSettings
+  accessibility: AccessibilitySettings
+  /** Ciphertext-only private-vault generations retained locally. */
+  backupRetention: 1 | 3 | 5 | 10
   telemetry: false // Sibyl never sends telemetry.
 }
 
@@ -396,7 +582,14 @@ export interface EngineStatus {
   operation?: EngineOperation
 }
 
-export type EngineOperationKind = 'load' | 'unload' | 'generate' | 'scene-beat' | 'compact' | 'shutdown'
+export type EngineOperationKind =
+  | 'load'
+  | 'unload'
+  | 'generate'
+  | 'scene-beat'
+  | 'scene-director'
+  | 'compact'
+  | 'shutdown'
 
 export interface EngineOperation {
   id: string

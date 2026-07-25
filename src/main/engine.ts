@@ -1,9 +1,10 @@
 import { EventEmitter } from 'node:events'
+import { createHash } from 'node:crypto'
 import type * as NLC from 'node-llama-cpp'
 import type {
   AppSettings,
   ChatMessage,
-  CompactionInfo,
+  CompactionResult,
   Conversation,
   ContextUsage,
   ContextUsageProjection,
@@ -12,12 +13,24 @@ import type {
   GenerationEvent,
   GenerationOptions,
   InstalledModel,
-  Persona
+  Persona,
+  RoleplayFact,
+  SceneDirectorDecision
 } from '@shared/types'
 import { DEFAULT_GENERATION_OPTIONS } from '@shared/types'
 import { contextLevel, keepRecentCount, summaryBudgetTokens } from '@shared/context'
-import { findPersona } from '@shared/personas'
+import {
+  personaPromptForSpeaker,
+  messageContentForSpeaker,
+  resolveConversationPersona,
+  roleplayStatePrompt
+} from '@shared/roleplay'
 import { buildBeatPrompt, isScene, nextSpeakerId, sceneCast, type SceneTurn } from '@shared/scene'
+import {
+  DIRECTOR_MAX_COMPLETION_TOKENS,
+  DIRECTOR_MAX_PROMPT_TOKENS,
+  parseDirectorOutput
+} from '@shared/sceneDirector'
 import { getLlamaInstance } from './llama'
 import { getInstalledModel, getSettings, upsertInstalledModel } from './store'
 import { SerialQueue } from '@shared/serial'
@@ -25,6 +38,99 @@ import { SerialQueue } from '@shared/serial'
 /** Prefix the folded-history summary is injected under, inside the system turn. */
 const SUMMARY_PREFIX =
   'Summary of earlier conversation (older turns were condensed to save context):\n'
+
+const ROLEPLAY_FACT_CATEGORIES = new Set<RoleplayFact['category']>([
+  'time',
+  'location',
+  'object',
+  'condition',
+  'obligation',
+  'relationship',
+  'plot',
+  'goal',
+  'other'
+])
+
+export function parseRoleplayMaintenance(
+  output: string,
+  allowedMessageIds: Set<string>,
+  compactedAt: string
+): { recap: string; facts: RoleplayFact[] } {
+  const unfenced = output
+    .replace(/^\s*```(?:json)?\s*/i, '')
+    .replace(/\s*```\s*$/, '')
+    .trim()
+  const start = unfenced.indexOf('{')
+  const end = unfenced.lastIndexOf('}')
+  if (start < 0 || end <= start) throw new Error('Roleplay maintenance returned invalid JSON.')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(unfenced.slice(start, end + 1))
+  } catch {
+    throw new Error('Roleplay maintenance returned invalid JSON.')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Roleplay maintenance returned an invalid object.')
+  }
+  const record = parsed as Record<string, unknown>
+  if (Object.keys(record).some((key) => key !== 'recap' && key !== 'facts')) {
+    throw new Error('Roleplay maintenance returned unknown fields.')
+  }
+  const recap = typeof record.recap === 'string' ? record.recap.trim() : ''
+  if (!recap || recap.length > 100_000 || !Array.isArray(record.facts) || record.facts.length > 64) {
+    throw new Error('Roleplay maintenance returned invalid recap or facts.')
+  }
+  const facts: RoleplayFact[] = record.facts.map((value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('Roleplay maintenance returned an invalid fact.')
+    }
+    const fact = value as Record<string, unknown>
+    if (
+      Object.keys(fact).some(
+        (key) => key !== 'category' && key !== 'text' && key !== 'sourceMessageIds'
+      ) ||
+      !ROLEPLAY_FACT_CATEGORIES.has(fact.category as RoleplayFact['category']) ||
+      typeof fact.text !== 'string' ||
+      !fact.text.trim() ||
+      fact.text.length > 10_000 ||
+      !Array.isArray(fact.sourceMessageIds) ||
+      fact.sourceMessageIds.length < 1 ||
+      fact.sourceMessageIds.length > 32 ||
+      fact.sourceMessageIds.some(
+        (id) => typeof id !== 'string' || !allowedMessageIds.has(id)
+      )
+    ) {
+      throw new Error('Roleplay maintenance returned an invalid fact.')
+    }
+    const provenanceMessageIds = [...new Set(fact.sourceMessageIds as string[])]
+    const text = fact.text.trim()
+    const fingerprint = createHash('sha256')
+      .update(
+        JSON.stringify({
+          category: fact.category,
+          text,
+          provenanceMessageIds
+        }),
+        'utf8'
+      )
+      .digest('base64url')
+      .slice(0, 32)
+    return {
+      id: `memory-${fingerprint}`,
+      category: fact.category as RoleplayFact['category'],
+      text,
+      visibility: { kind: 'public' },
+      provenanceMessageIds,
+      userAuthored: false,
+      pinned: false,
+      updatedAt: compactedAt
+    }
+  })
+  if (new Set(facts.map((fact) => fact.id)).size !== facts.length) {
+    throw new Error('Roleplay maintenance returned duplicate facts.')
+  }
+  return { recap, facts }
+}
 
 /**
  * Owns the single loaded model + active chat session. One model is resident at
@@ -40,6 +146,8 @@ export class InferenceEngine extends EventEmitter {
 
   private loadedModelId: string | null = null
   private sessionConversationId: string | null = null
+  /** In-memory only; never log or persist because it is derived from private prompt inputs. */
+  private sessionInputFingerprint: string | null = null
   private contextSize: number | null = null
 
   private state: EngineStatus['state'] = 'idle'
@@ -177,6 +285,7 @@ export class InferenceEngine extends EventEmitter {
         this.loadedModelId = modelId
         this.loadedConfiguration = configuration
         this.sessionConversationId = null
+        this.sessionInputFingerprint = null
         model = null
         context = null
         sequence = null
@@ -255,6 +364,7 @@ export class InferenceEngine extends EventEmitter {
     this.loadedModelId = null
     this.loadedConfiguration = null
     this.sessionConversationId = null
+    this.sessionInputFingerprint = null
     this.contextSize = null
     try {
       sequence?.dispose()
@@ -293,12 +403,20 @@ export class InferenceEngine extends EventEmitter {
 
   // -- chat session ---------------------------------------------------------
 
-  private toHistory(messages: ChatMessage[], systemPrompt: string): NLC.ChatHistoryItem[] {
+  private toHistory(
+    messages: ChatMessage[],
+    systemPrompt: string,
+    speakerId?: string,
+    knowledgeMode?: Conversation['knowledgeMode']
+  ): NLC.ChatHistoryItem[] {
     const history: NLC.ChatHistoryItem[] = [{ type: 'system', text: systemPrompt }]
     for (const m of messages) {
-      if (!m.content.trim()) continue
-      if (m.role === 'user') history.push({ type: 'user', text: m.content })
-      else if (m.role === 'assistant') history.push({ type: 'model', response: [m.content] })
+      const content = speakerId
+        ? messageContentForSpeaker(m, speakerId, knowledgeMode)
+        : m.content
+      if (!content.trim()) continue
+      if (m.role === 'user') history.push({ type: 'user', text: content })
+      else if (m.role === 'assistant') history.push({ type: 'model', response: [content] })
     }
     return history
   }
@@ -311,13 +429,21 @@ export class InferenceEngine extends EventEmitter {
    */
   private systemPromptFor(conversation: Conversation, settings: AppSettings): string {
     const override = conversation.overrides?.systemPrompt?.trim()
-    const persona = findPersona(settings.personas, conversation.personaId)
+    const persona = resolveConversationPersona(
+      conversation,
+      conversation.personaId,
+      settings.personas
+    )
     const systemMessage = conversation.messages.find((m) => m.role === 'system')
     let prompt =
       override ||
       persona?.brief?.trim() ||
       systemMessage?.content?.trim() ||
       settings.load.systemPrompt
+    if (persona) {
+      const identity = personaPromptForSpeaker(persona, [persona])
+      if (identity) prompt += `\n\n${identity}`
+    }
 
     const uc = conversation.userCharacter
     const ucName = uc?.name?.trim()
@@ -328,7 +454,40 @@ export class InferenceEngine extends EventEmitter {
 
     const summary = conversation.compaction?.summary?.trim()
     if (summary) prompt += `\n\n${SUMMARY_PREFIX}${summary}`
+    if (persona) {
+      const continuity = roleplayStatePrompt(
+        conversation,
+        persona.id,
+        conversation.roleplayState?.recap?.trim() !== summary
+      )
+      if (continuity) prompt += `\n\nKnown continuity:\n${continuity}`
+    }
     return prompt
+  }
+
+  private warmSessionFingerprint(
+    conversation: Conversation,
+    settings: AppSettings,
+    systemPrompt: string
+  ): string {
+    const persona = resolveConversationPersona(
+      conversation,
+      conversation.personaId,
+      settings.personas
+    )
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          systemPrompt,
+          personaId: persona?.id ?? null,
+          personaBrief: persona?.brief ?? null,
+          userCharacter: conversation.userCharacter ?? null,
+          compactionThrough: conversation.compaction?.throughMessageId ?? null,
+          compactionSummary: conversation.compaction?.summary ?? null
+        }),
+        'utf8'
+      )
+      .digest('base64url')
   }
 
   /**
@@ -342,7 +501,9 @@ export class InferenceEngine extends EventEmitter {
     optionsOverride: Partial<GenerationOptions> | undefined,
     personaOverride?: Persona | null
   ): GenerationOptions {
-    const persona = personaOverride ?? findPersona(settings.personas, conversation.personaId)
+    const persona =
+      personaOverride ??
+      resolveConversationPersona(conversation, conversation.personaId, settings.personas)
     return {
       ...DEFAULT_GENERATION_OPTIONS,
       ...settings.generation,
@@ -368,10 +529,14 @@ export class InferenceEngine extends EventEmitter {
     if (!this.session) throw new Error('No model loaded')
     const settings = await getSettings()
     const systemPrompt = this.systemPromptFor(conversation, settings)
+    const fingerprint = this.warmSessionFingerprint(conversation, settings, systemPrompt)
 
     // Reuse the live session (and its warm KV cache) when continuing the same
     // conversation; otherwise swap the session's history to this conversation.
-    if (this.sessionConversationId === conversation.id) {
+    if (
+      this.sessionConversationId === conversation.id &&
+      this.sessionInputFingerprint === fingerprint
+    ) {
       return this.session
     }
 
@@ -390,8 +555,11 @@ export class InferenceEngine extends EventEmitter {
       }
       break
     }
-    this.session.setChatHistory(this.toHistory(prior, systemPrompt))
+    this.session.setChatHistory(
+      this.toHistory(prior, systemPrompt, conversation.personaId, conversation.knowledgeMode)
+    )
     this.sessionConversationId = conversation.id
+    this.sessionInputFingerprint = fingerprint
     return this.session
   }
 
@@ -407,10 +575,18 @@ export class InferenceEngine extends EventEmitter {
       const settings = await getSettings()
       const systemPrompt = this.systemPromptFor(conversation, settings)
       const prior = this.liveMessages(conversation).filter((m) => m.role !== 'system')
-      this.session.setChatHistory(this.toHistory(prior, systemPrompt))
+      this.session.setChatHistory(
+        this.toHistory(prior, systemPrompt, conversation.personaId, conversation.knowledgeMode)
+      )
       this.sessionConversationId = conversation.id
+      this.sessionInputFingerprint = this.warmSessionFingerprint(
+        conversation,
+        settings,
+        systemPrompt
+      )
     } catch {
       this.sessionConversationId = null // couldn't restore — force a clean rebuild next turn
+      this.sessionInputFingerprint = null
     }
   }
 
@@ -547,6 +723,163 @@ export class InferenceEngine extends EventEmitter {
     return history
   }
 
+  async directScene(conversation: Conversation): Promise<SceneDirectorDecision> {
+    const settings = await getSettings()
+    const cast = sceneCast(conversation, settings.personas)
+    const fallbackSpeakerId = nextSpeakerId(conversation, settings.personas) ?? undefined
+    const fallback = (
+      reason: string,
+      cost: Partial<
+        Pick<
+          SceneDirectorDecision,
+          'usedModel' | 'promptTokens' | 'completionTokens' | 'durationMs'
+        >
+      > = {}
+    ): SceneDirectorDecision => ({
+      action: fallbackSpeakerId ? 'continue' : 'pause',
+      speakerId: fallbackSpeakerId,
+      intent: fallbackSpeakerId
+        ? 'Use deterministic round-robin.'
+        : 'Pause because no valid speaker is available.',
+      usedModel: cost.usedModel ?? false,
+      fallbackReason: reason,
+      promptTokens: cost.promptTokens ?? 0,
+      completionTokens: cost.completionTokens ?? 0,
+      durationMs: cost.durationMs ?? 0
+    })
+    if (!conversation.director?.enabled || !conversation.director.useModel) {
+      return fallback('disabled')
+    }
+    if (!this.session || !this.model || cast.length < 2) return fallback('unavailable')
+    const session = this.session
+    if (this.activeOperation) return fallback('busy')
+
+    const controller = new AbortController()
+    const operation = this.operation('scene-director', { conversationId: conversation.id }, controller)
+    this.activeOperation = operation
+    this.abort = controller
+    const timeout = setTimeout(() => controller.abort(), 12_000)
+    return this.lifecycle.run(async () => {
+      const started = Date.now()
+      let prompt = ''
+      let output = ''
+      try {
+        const roster = cast
+          .map(
+            (persona) =>
+              `${persona.id}: ${persona.name.slice(0, 120)} — ${persona.role.slice(0, 200)}`
+          )
+          .join('\n')
+        const transcriptLines = this.liveMessages(conversation)
+          .filter((message) => message.role !== 'system' && message.content.trim())
+          .slice(-12)
+          .map((message) => {
+            const name = message.director
+              ? 'Director'
+              : message.role === 'user'
+                ? 'Human'
+                : message.speakerName ?? message.speakerId ?? 'Character'
+            return `${name}: ${message.content.trim()}`
+          })
+        const config = conversation.director
+        const promptPrefix =
+          'Return only JSON with exactly action, speakerId, intent. action is continue, pause, or end. ' +
+          'For continue, speakerId must be one roster id. For pause/end, omit speakerId. intent is a ' +
+          'private planning sentence under 500 characters. Choose a natural next speaker or pause/end ' +
+          'when the scene has reached a real stopping point. Never invent a participant.\n\n' +
+          `Goal: ${config?.sceneGoal?.trim().slice(0, 1_000) || 'Continue the scene coherently.'}\n` +
+          `Pacing: ${config?.pacing ?? 'balanced'}; initiative: ${config?.initiative ?? 'balanced'}; ` +
+          `human interruption: ${config?.interruption ?? 'natural-pauses'}\n\nRoster:\n${roster}\n\n` +
+          'Recent scene:\n'
+        if (this.tokenCount(promptPrefix) > DIRECTOR_MAX_PROMPT_TOKENS) {
+          return fallback('prompt-too-large')
+        }
+        let transcript = ''
+        for (let index = transcriptLines.length - 1; index >= 0; index -= 1) {
+          const line = transcriptLines[index]
+          const candidate = transcript ? `${line}\n${transcript}` : line
+          if (
+            this.tokenCount(promptPrefix + candidate) <= DIRECTOR_MAX_PROMPT_TOKENS
+          ) {
+            transcript = candidate
+            continue
+          }
+          if (!transcript) {
+            let low = 0
+            let high = line.length
+            while (low < high) {
+              const middle = Math.ceil((low + high) / 2)
+              const tail = `…${line.slice(-middle)}`
+              if (
+                this.tokenCount(promptPrefix + tail) <= DIRECTOR_MAX_PROMPT_TOKENS
+              ) {
+                low = middle
+              } else {
+                high = middle - 1
+              }
+            }
+            if (low > 0) transcript = `…${line.slice(-low)}`
+          }
+          break
+        }
+        prompt = promptPrefix + (transcript || '(The scene has not started.)')
+        session.setChatHistory([
+          { type: 'system', text: 'You are a private local scene director. Output strict JSON only.' }
+        ])
+        this.sessionConversationId = null
+        this.sessionInputFingerprint = null
+        await this.setState('generating')
+        output = await session.prompt(prompt, {
+          signal: controller.signal,
+          stopOnAbortSignal: true,
+          temperature: 0.2,
+          maxTokens: DIRECTOR_MAX_COMPLETION_TOKENS
+        })
+        if (controller.signal.aborted) {
+          return fallback('timeout', {
+            usedModel: true,
+            promptTokens: this.tokenCount(prompt),
+            completionTokens: this.tokenCount(output),
+            durationMs: Date.now() - started
+          })
+        }
+        const decision = parseDirectorOutput(output, new Set(cast.map((persona) => persona.id)))
+        return {
+          ...decision,
+          usedModel: true,
+          promptTokens: this.tokenCount(prompt),
+          completionTokens: this.tokenCount(output),
+          durationMs: Date.now() - started
+        }
+      } catch {
+        return fallback(controller.signal.aborted ? 'timeout' : 'invalid-output', {
+          usedModel: true,
+          promptTokens: this.tokenCount(prompt),
+          completionTokens: this.tokenCount(output),
+          durationMs: Date.now() - started
+        })
+      } finally {
+        clearTimeout(timeout)
+        if (this.abort === controller) this.abort = null
+        this.clearOperation(operation)
+        if (!this.shutdownRequested) await this.setState(this.model ? 'ready' : 'idle')
+      }
+    })
+  }
+
+  abortSceneDirector(conversationId: string): boolean {
+    const operation = this.activeOperation
+    if (
+      operation?.kind !== 'scene-director' ||
+      operation.conversationId !== conversationId ||
+      !operation.controller
+    ) {
+      return false
+    }
+    operation.controller.abort()
+    return true
+  }
+
   /**
    * Generate one beat of a self-roleplay scene: the next line spoken by the cast
    * persona `speakerId`. Unlike generate(), the active speaker (and therefore the
@@ -595,7 +928,7 @@ export class InferenceEngine extends EventEmitter {
     try {
       const settings = await getSettings()
       const cast = sceneCast(conversation, settings.personas)
-      const speaker = findPersona(settings.personas, speakerId)
+      const speaker = resolveConversationPersona(conversation, speakerId, settings.personas)
       if (!speaker) {
         this.emitEvent({
           type: 'error',
@@ -613,7 +946,12 @@ export class InferenceEngine extends EventEmitter {
         speaker,
         cast,
         userCharacter: conversation.userCharacter,
-        scenePremise: conversation.scenePremise
+        scenePremise: conversation.scenePremise,
+        sceneInstruction: conversation.overrides?.systemPrompt,
+        roleplayState: conversation.roleplayState,
+        knowledgeMode: conversation.knowledgeMode,
+        directions: conversation.directions,
+        compactionSummary: conversation.compaction?.summary
       })
       let system = beat.system
       const summary = conversation.compaction?.summary?.trim()
@@ -622,6 +960,7 @@ export class InferenceEngine extends EventEmitter {
       // The speaker changes every beat — always rebuild the session history.
       session.setChatHistory(this.sceneHistory(system, beat.history))
       this.sessionConversationId = null
+      this.sessionInputFingerprint = null
 
       const stopTriggers = [...(opts.stopSequences ?? []), ...beat.stopTriggers].filter(Boolean)
       await this.setState('generating')
@@ -697,6 +1036,7 @@ export class InferenceEngine extends EventEmitter {
       if (this.abort === controller) this.abort = null
       // The session no longer matches any single conversation's history.
       this.sessionConversationId = null
+      this.sessionInputFingerprint = null
       this.clearOperation(operation)
       if (!this.shutdownRequested) await this.setState(this.model ? 'ready' : 'idle')
       void this.emitUsage(conversation)
@@ -742,6 +1082,7 @@ export class InferenceEngine extends EventEmitter {
   invalidateSession(conversationId?: string): void {
     if (!conversationId || this.sessionConversationId === conversationId) {
       this.sessionConversationId = null
+      this.sessionInputFingerprint = null
     }
   }
 
@@ -773,14 +1114,23 @@ export class InferenceEngine extends EventEmitter {
       const cast = sceneCast(conversation, settings.personas)
       const requestedSpeakerId =
         sceneSpeakerId ?? nextSpeakerId(conversation, settings.personas)
-      const speaker = findPersona(settings.personas, requestedSpeakerId)
+      const speaker = resolveConversationPersona(
+        conversation,
+        requestedSpeakerId,
+        settings.personas
+      )
       if (speaker) {
         const beat = buildBeatPrompt({
           messages: this.liveMessages(conversation),
           speaker,
           cast,
           userCharacter: conversation.userCharacter,
-          scenePremise: conversation.scenePremise
+          scenePremise: conversation.scenePremise,
+          sceneInstruction: conversation.overrides?.systemPrompt,
+          roleplayState: conversation.roleplayState,
+          knowledgeMode: conversation.knowledgeMode,
+          directions: conversation.directions,
+          compactionSummary: conversation.compaction?.summary
         })
         const summary = conversation.compaction?.summary?.trim()
         let total = this.tokenCount(beat.system) + (summary ? this.tokenCount(summary) : 0) + 8
@@ -932,7 +1282,7 @@ export class InferenceEngine extends EventEmitter {
    * Returns the new compaction record for the caller to persist onto the
    * conversation — the engine does not own conversation state.
    */
-  async compact(conversation: Conversation): Promise<CompactionInfo> {
+  async compact(conversation: Conversation): Promise<CompactionResult> {
     if (!this.session || !this.model) throw new Error('No model is loaded.')
     const session = this.session
     if (this.activeOperation) throw new Error('Cannot compact while another operation is in progress.')
@@ -974,15 +1324,49 @@ export class InferenceEngine extends EventEmitter {
       // into one voice (it rides in every later beat's system prompt).
       const foldLabel = (m: ChatMessage): string =>
         m.director ? 'Director' : m.role === 'user' ? 'User' : m.speakerName?.trim() || 'Assistant'
-      const transcript = toFold.map((m) => `${foldLabel(m)}: ${m.content.trim()}`).join('\n\n')
+      const transcript = toFold
+        .map((message) => ({
+          message,
+          // Director guidance is out-of-character control data, not public
+          // scene continuity. Structured directions are carried separately,
+          // and neither legacy nor structured notes may be promoted into the
+          // cast-visible recap.
+          content: message.director
+            ? ''
+            : messageContentForSpeaker(
+                message,
+                '__public-recap__',
+                'scoped'
+              ).trim()
+        }))
+        .filter((item) => item.content)
+        .map((item) => `[${item.message.id}] ${foldLabel(item.message)}: ${item.content}`)
+        .join('\n\n')
+      const pinnedPublicFacts = conversation.roleplayState?.facts
+        .filter((fact) => fact.pinned && fact.visibility.kind === 'public')
+        .map((fact) => `- ${fact.text}`)
+        .join('\n')
       const instruction =
         (priorSummary
           ? `Existing summary of the conversation so far:\n${priorSummary}\n\n`
           : '') +
-        'Update (or create) a concise summary of the conversation that preserves all ' +
-        'facts, decisions, names, code, numbers and unresolved questions needed to ' +
-        'continue. Write terse third-person notes. Do not add commentary or address ' +
-        'the user.\n\nConversation excerpt to fold in:\n' +
+        (isScene(conversation)
+          ? 'Return only one JSON object with exactly these keys: "recap" (a concise string) and ' +
+            '"facts" (an array). Each fact must have exactly "category", "text", and ' +
+            '"sourceMessageIds". Category must be one of time, location, object, condition, ' +
+            'obligation, relationship, plot, goal, other. Source ids must be copied exactly from ' +
+            'the bracketed message ids below. Extract only public facts supported by the excerpt. ' +
+            'The recap must preserve scene time and location, important objects and ownership, ' +
+            'injuries, promises, decisions, relationship changes, open plot threads, goals, and ' +
+            'end conditions. Do not contradict pinned structured facts. '
+          : 'Update (or create) a concise summary of the conversation that preserves all facts, ' +
+            'decisions, names, code, numbers and unresolved questions needed to continue. ') +
+        'Write terse third-person notes. Do not add commentary or address the user.' +
+        (pinnedPublicFacts
+          ? `\n\nPinned facts (must remain true):\n${pinnedPublicFacts}`
+          : '') +
+        '\n\n' +
+        'Conversation excerpt to fold in:\n' +
         transcript
 
       // Summarization runs on the shared session, which clobbers its chat history.
@@ -992,9 +1376,16 @@ export class InferenceEngine extends EventEmitter {
       // a half-generated summary is discarded rather than persisted.
       await this.setState('generating')
       let summary = ''
+      let roleplayFacts: RoleplayFact[] | undefined
+      const compactedAt = new Date().toISOString()
       try {
         session.setChatHistory([
-          { type: 'system', text: 'You are a precise conversation summarizer.' }
+          {
+            type: 'system',
+            text: isScene(conversation)
+              ? 'You maintain precise roleplay continuity without inventing facts.'
+              : 'You are a precise conversation summarizer.'
+          }
         ])
         const out = await session.prompt(instruction, {
           signal: controller.signal,
@@ -1005,7 +1396,17 @@ export class InferenceEngine extends EventEmitter {
           maxTokens: summaryBudgetTokens(contextSize, settings.context.summaryTokenFraction)
         })
         if (controller.signal.aborted) throw new Error('Compaction cancelled.')
-        summary = out.trim()
+        if (isScene(conversation)) {
+          const maintenance = parseRoleplayMaintenance(
+            out,
+            new Set(toFold.map((message) => message.id)),
+            compactedAt
+          )
+          summary = maintenance.recap
+          roleplayFacts = maintenance.facts
+        } else {
+          summary = out.trim()
+        }
         if (!summary) throw new Error('Summarization produced no output.')
       } catch (err) {
         await this.restoreSession(conversation)
@@ -1018,15 +1419,19 @@ export class InferenceEngine extends EventEmitter {
 
       // Success: invalidate so the next generate rebuilds from the compacted history.
       this.sessionConversationId = null
+      this.sessionInputFingerprint = null
 
       return {
-        summary,
-        throughMessageId,
-        foldedCount: (conversation.compaction?.foldedCount ?? 0) + toFold.length,
-        originalTokens:
-          this.tokenCount(transcript) + (priorSummary ? this.tokenCount(priorSummary) : 0),
-        summaryTokens: this.tokenCount(summary),
-        compactedAt: new Date().toISOString()
+        compaction: {
+          summary,
+          throughMessageId,
+          foldedCount: (conversation.compaction?.foldedCount ?? 0) + toFold.length,
+          originalTokens:
+            this.tokenCount(transcript) + (priorSummary ? this.tokenCount(priorSummary) : 0),
+          summaryTokens: this.tokenCount(summary),
+          compactedAt
+        },
+        roleplayFacts
       }
     } finally {
       this.clearOperation(operation)

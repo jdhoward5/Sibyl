@@ -97,9 +97,11 @@ architectures — e.g. **gemma4** — that the prebuilt binaries don't yet suppo
 regenerated from source by the `rebuild:llama*` scripts above (not committed to git).
 
 The Windows build uses **Squirrel.Windows** (side-by-side installs, applied on
-restart — never overwriting the running binary). The macOS build is an **unsigned**
-`.dmg`: without an Apple Developer ID we can't sign or notarize, so on first launch
-macOS Gatekeeper will block it — **right-click → Open** (or
+restart — never overwriting the running binary). Before an update starts, Sibyl
+verifies the release's detached Ed25519 manifest and exact Squirrel feed hash.
+The macOS build is an **unsigned** `.dmg`: without an Apple Developer ID we can't
+sign or notarize, so on first launch macOS Gatekeeper will block it —
+**right-click → Open** (or
 `xattr -dr com.apple.quarantine /Applications/Sibyl.app`) once to allow it.
 Because Squirrel.Mac requires signing, the macOS build has **no in-app updater** —
 update by re-downloading the `.dmg`. Windows updates automatically in-app.
@@ -113,17 +115,20 @@ typecheck/test/build on every push/PR via hosted Windows + macOS runners.
 
 ```bash
 # Windows (on a CUDA-capable dev box):
-npm run release         # verify + GPU smoke + build Squirrel artifacts + publish
+npm run release         # clean npm-ci build + packaged GPU smoke + signed provenance + publish
 
 # macOS (on an Apple-Silicon Mac):
-npm run release:mac     # verify + build .dmg/.zip + publish (--dry-run to skip publish)
+npm run release:mac     # clean build + packaged Metal smoke + signed provenance + publish
 ```
 
-`scripts/release.ps1` (Windows) and `scripts/release-mac.mjs` (macOS) each refuse a
-dirty tree, run the tests, build the platform artifacts, tag the commit
-`v<version>`, and publish them to that GitHub release (needs an authenticated `gh`
-CLI). The two can target the **same** `v<version>` tag — whichever runs second
-uploads its assets onto the existing release.
+`scripts/release.ps1` (Windows) and `scripts/release-mac.mjs` (macOS) each refuse
+a dirty tree, rebuild from `npm ci` in a disposable worktree, verify pinned
+dependencies/native hashes and tag state, run the static/Electron/passkey and
+packaged-model gates, then emit SHA-256 files, a CycloneDX SBOM, package
+inventory, and signed release manifest before publishing (requires an
+authenticated `gh` CLI). Both platforms can target the same `v<version>` tag:
+existing asset names are downloaded and hash-compared, exact matches are
+skipped, and conflicts abort without overwriting.
 
 ## Security notes
 
@@ -134,9 +139,13 @@ uploads its assets onto the existing release.
 - A strict Content-Security-Policy is applied both via response headers (main)
   and a `<meta>` tag. `connect-src` is limited to Hugging Face over TLS.
 - External links open in the system browser; in-app navigation is blocked.
-- Conversations and models are stored under Electron's `userData`. The optional
-  Hugging Face token is encrypted with `safeStorage` (OS keychain) and never
-  written in plaintext.
+- Conversation/persona content and semantic metadata are stored only as
+  authenticated encrypted vault records under Electron's `userData`; rotating
+  backups and portable `.sibyl` bundles are encrypted too. Every vault has an
+  Argon2id recovery passphrase, with optional seamless OS-protected device unlock,
+  optional “require unlock on open,” and capability-gated WebAuthn PRF passkey
+  unlock. The optional Hugging Face token remains separately protected by
+  `safeStorage` and never enters renderer memory.
 - Sibyl sends **no telemetry**. Inference is fully local.
 
 ## License

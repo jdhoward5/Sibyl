@@ -48,6 +48,8 @@ const bridge: SibylBridge = {
   chat: {
     send: (req: ChatSendRequest) => ipcRenderer.invoke(IPC.chatSend, req),
     advance: (req: ChatAdvanceRequest) => ipcRenderer.invoke(IPC.chatAdvance, req),
+    direct: (conversationId) => ipcRenderer.invoke(IPC.chatDirect, conversationId),
+    abortDirector: (conversationId) => ipcRenderer.invoke(IPC.chatDirectAbort, conversationId),
     abort: (req) => ipcRenderer.invoke(IPC.chatAbort, req),
     compact: (conversationId) => ipcRenderer.invoke(IPC.chatCompact, conversationId),
     invalidateSession: (conversationId) => ipcRenderer.invoke(IPC.chatInvalidate, conversationId),
@@ -70,6 +72,31 @@ const bridge: SibylBridge = {
     set: (patch: RendererSettingsPatch) => ipcRenderer.invoke(IPC.settingsSet, patch),
     setHfToken: (token) => ipcRenderer.invoke(IPC.settingsSetHfToken, token),
     clearHfToken: () => ipcRenderer.invoke(IPC.settingsClearHfToken)
+  },
+  vault: {
+    status: () => ipcRenderer.invoke(IPC.vaultStatus),
+    setup: (request) => ipcRenderer.invoke(IPC.vaultSetup, request),
+    unlock: (recoveryPassphrase) => ipcRenderer.invoke(IPC.vaultUnlock, recoveryPassphrase),
+    unlockPasskey: () => ipcRenderer.invoke(IPC.vaultUnlockPasskey),
+    lock: () => ipcRenderer.invoke(IPC.vaultLock),
+    setSeamless: (enabled) => ipcRenderer.invoke(IPC.vaultSetSeamless, enabled),
+    setPasskey: (enabled) => ipcRenderer.invoke(IPC.vaultSetPasskey, enabled),
+    changeRecoveryPassphrase: (recoveryPassphrase) =>
+      ipcRenderer.invoke(IPC.vaultChangeRecoveryPassphrase, recoveryPassphrase),
+    listBackups: () => ipcRenderer.invoke(IPC.vaultListBackups),
+    createBackup: () => ipcRenderer.invoke(IPC.vaultCreateBackup),
+    verifyRecovery: () => ipcRenderer.invoke(IPC.vaultVerifyRecovery),
+    restoreBackup: (id) => ipcRenderer.invoke(IPC.vaultRestoreBackup, id)
+  },
+  portable: {
+    exportConversation: (id, recoveryPassphrase) =>
+      ipcRenderer.invoke(IPC.portableExportConversation, id, recoveryPassphrase),
+    exportLibrary: (recoveryPassphrase) =>
+      ipcRenderer.invoke(IPC.portableExportLibrary, recoveryPassphrase),
+    inspectImport: (recoveryPassphrase) =>
+      ipcRenderer.invoke(IPC.portableInspectImport, recoveryPassphrase),
+    commitImport: (token) => ipcRenderer.invoke(IPC.portableCommitImport, token),
+    discardImport: (token) => ipcRenderer.invoke(IPC.portableDiscardImport, token)
   },
   app: {
     info: () => ipcRenderer.invoke(IPC.appInfo),

@@ -17,11 +17,18 @@ export function Toast() {
   return (
     <div className="pointer-events-none fixed bottom-6 left-1/2 z-50 -translate-x-1/2 animate-fade-in">
       <div
+        role={toast.kind === 'error' ? 'alert' : 'status'}
+        aria-live={toast.kind === 'error' ? 'assertive' : 'polite'}
+        aria-atomic="true"
         className={`pointer-events-auto flex max-w-md items-center gap-2.5 rounded-xl border px-4 py-2.5 text-sm shadow-2xl backdrop-blur ${tone}`}
       >
         <Icon size={16} />
         <span className="flex-1">{toast.message}</span>
-        <button onClick={() => actions.dismissToast()} className="opacity-60 hover:opacity-100">
+        <button
+          onClick={() => actions.dismissToast()}
+          className="opacity-60 hover:opacity-100"
+          aria-label="Dismiss notification"
+        >
           <XIcon size={14} />
         </button>
       </div>

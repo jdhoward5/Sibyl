@@ -8,30 +8,37 @@ import type {
   Conversation,
   InstalledModel,
   Persona,
+  PrivateVaultBackup,
+  PrivateVaultStatus,
   RendererSettings,
+  RendererSettingsPatch,
   ResourceAvailability,
   StorageIssue,
   SystemPromptPreset
 } from '@shared/types'
 import {
   DEFAULT_CONTEXT_SETTINGS,
+  DEFAULT_ACCESSIBILITY_SETTINGS,
   DEFAULT_GENERATION_OPTIONS,
   DEFAULT_GENERATION_PROFILES
 } from '@shared/types'
 import { DEFAULT_TTS_SETTINGS, type InstalledVoice } from '@shared/tts'
 import { DEFAULT_ACCENT } from '@shared/themes'
 import { DEFAULT_PERSONAS, gradientFor, initialsOf } from '@shared/personas'
+import { migrateConversationIdentity, normalizePersona } from '@shared/roleplay'
 import { parseCanonicalId, parseConversation } from '@shared/validation'
 import { SerialQueue } from '@shared/serial'
+import type { PreparedPortableImport } from '@shared/portable'
+import {
+  PrivateVaultStore,
+  type DeviceKeyProtector,
+  type InitialPrivateRecord
+} from './vaultStore'
+import { passkeyProvider } from './passkey'
 
 /** Deep-ish clone so callers can't mutate the shared default persona objects. */
 function clonePersona(p: Persona): Persona {
-  return {
-    ...p,
-    avatar: { ...p.avatar, gradient: [...p.avatar.gradient] },
-    voiceTags: [...p.voiceTags],
-    generation: p.generation ? { ...p.generation } : undefined
-  }
+  return normalizePersona(structuredClone(p))
 }
 
 /** Convert a legacy prompt preset (name + prompt) into a brief-only persona. */
@@ -62,16 +69,16 @@ function defaultModelsDir(): string {
   return path.join(userDataDir(), 'models')
 }
 
-function settingsPath(): string {
-  return path.join(userDataDir(), 'settings.json')
-}
-
 function registryPath(): string {
   return path.join(userDataDir(), 'models.json')
 }
 
 function conversationsDir(): string {
   return path.join(userDataDir(), 'conversations')
+}
+
+function privateVaultDir(): string {
+  return path.join(userDataDir(), 'vault')
 }
 
 async function ensureDir(dir: string): Promise<void> {
@@ -109,15 +116,6 @@ function conversationQueue(id: string): SerialQueue {
   return queue
 }
 
-async function readJSON<T>(filePath: string, fallback: T): Promise<T> {
-  try {
-    const raw = await fs.readFile(filePath, 'utf8')
-    return JSON.parse(raw) as T
-  } catch {
-    return fallback
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
@@ -147,6 +145,8 @@ function defaultSettings(): AppSettings {
     promptPresets: [],
     generationProfiles: DEFAULT_GENERATION_PROFILES.map((p) => ({ ...p, options: { ...p.options } })),
     tts: { ...DEFAULT_TTS_SETTINGS },
+    accessibility: { ...DEFAULT_ACCESSIBILITY_SETTINGS },
+    backupRetention: 3,
     telemetry: false
   }
 }
@@ -184,11 +184,319 @@ function decryptToken(enc: string | null): string | null {
   return null
 }
 
+const deviceKeyProtector: DeviceKeyProtector = {
+  available: async () => {
+    try {
+      if (process.platform === 'win32') return safeStorage.isEncryptionAvailable()
+      return await safeStorage.isAsyncEncryptionAvailable()
+    } catch {
+      return false
+    }
+  },
+  protect: async (masterKey) => {
+    if (process.platform === 'win32') {
+      return safeStorage.encryptString(masterKey.toString('base64url'))
+    }
+    return safeStorage.encryptStringAsync(masterKey.toString('base64url'))
+  },
+  unprotect: async (wrappedKey) => {
+    if (process.platform === 'win32') {
+      const result = safeStorage.decryptString(wrappedKey)
+      if (!/^[A-Za-z0-9_-]{43}$/.test(result)) {
+        throw new Error('Secure device storage returned invalid key material.')
+      }
+      return {
+        key: Buffer.from(result, 'base64url'),
+        shouldReprotect: false
+      }
+    }
+    const result = await safeStorage.decryptStringAsync(wrappedKey)
+    if (!/^[A-Za-z0-9_-]{43}$/.test(result.result)) {
+      throw new Error('Secure device storage returned invalid key material.')
+    }
+    return {
+      key: Buffer.from(result.result, 'base64url'),
+      shouldReprotect: result.shouldReEncrypt
+    }
+  }
+}
+
+let privateStore: PrivateVaultStore | null = null
+
+function vaultStore(): PrivateVaultStore {
+  if (!privateStore) {
+    privateStore = new PrivateVaultStore(
+      privateVaultDir(),
+      deviceKeyProtector,
+      passkeyProvider
+    )
+  }
+  return privateStore
+}
+
+function isFsError(error: unknown, code: string): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === code
+  )
+}
+
+async function legacySettingsFiles(): Promise<string[]> {
+  try {
+    return (await fs.readdir(userDataDir()))
+      .filter((name) => name === 'settings.json' || name.startsWith('settings.json.'))
+      .map((name) => path.join(userDataDir(), name))
+  } catch (error) {
+    if (isFsError(error, 'ENOENT')) return []
+    throw error
+  }
+}
+
+async function legacyConversationFiles(): Promise<string[]> {
+  try {
+    const entries = await fs.readdir(conversationsDir(), { withFileTypes: true })
+    const files: string[] = []
+    for (const entry of entries) {
+      if (!entry.isFile()) {
+        throw new Error('The legacy conversations directory contains an unexpected subdirectory.')
+      }
+      files.push(path.join(conversationsDir(), entry.name))
+    }
+    return files
+  } catch (error) {
+    if (isFsError(error, 'ENOENT')) return []
+    throw error
+  }
+}
+
+async function hasLegacyPrivateData(): Promise<boolean> {
+  return (
+    (await legacySettingsFiles()).length > 0 ||
+    (await legacyConversationFiles()).length > 0
+  )
+}
+
+async function initialPrivateRecords(): Promise<InitialPrivateRecord[]> {
+  const records: InitialPrivateRecord[] = []
+  const settingsFiles = await legacySettingsFiles()
+  let activeSettings: unknown = null
+  for (const file of settingsFiles) {
+    const raw = await fs.readFile(file)
+    if (path.basename(file) === 'settings.json') {
+      try {
+        const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw)) as unknown
+        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+          activeSettings = parsed
+          raw.fill(0)
+          continue
+        }
+      } catch {
+        // Preserve malformed legacy data below and use safe defaults for the
+        // live settings record.
+      }
+    }
+    records.push({
+      kind: 'legacy-private',
+      logicalId: `settings-recovery-${records.length + 1}`,
+      value: { originalName: path.basename(file), bytes: raw.toString('base64') }
+    })
+    raw.fill(0)
+  }
+  records.push({
+    kind: 'settings',
+    logicalId: 'main',
+    value: activeSettings ?? persistedSettings(defaultSettings())
+  })
+
+  const conversationFiles = await legacyConversationFiles()
+  for (const file of conversationFiles) {
+    const raw = await fs.readFile(file)
+    let migrated = false
+    if (path.extname(file) === '.json') {
+      try {
+        const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw)) as unknown
+        const conversation = parseConversation(parsed)
+        records.push({
+          kind: 'conversation',
+          logicalId: conversation.id,
+          value: conversation
+        })
+        migrated = true
+      } catch {
+        // Preserve malformed or obsolete data as an encrypted recovery record
+        // rather than deleting its only copy.
+      }
+    }
+    if (!migrated) {
+      records.push({
+        kind: 'legacy-private',
+        logicalId: `conversation-recovery-${records.length + 1}`,
+        value: { originalName: path.basename(file), bytes: raw.toString('base64') }
+      })
+    }
+    raw.fill(0)
+  }
+  records.push({
+    kind: 'migration',
+    logicalId: 'legacy',
+    value: {
+      importedLegacyPrivateData: settingsFiles.length > 0 || conversationFiles.length > 0
+    }
+  })
+  return records
+}
+
+async function removeLegacyPrivateData(): Promise<void> {
+  for (const file of await legacySettingsFiles()) await fs.rm(file, { force: true })
+  const conversationFiles = await legacyConversationFiles()
+  for (const file of conversationFiles) await fs.rm(file, { force: true })
+  if (conversationFiles.length > 0) {
+    await fs.rm(conversationsDir(), { recursive: true, force: true })
+  }
+}
+
+async function finishLegacyMigration(
+  status: PrivateVaultStatus
+): Promise<PrivateVaultStatus> {
+  let migrationRequired: boolean
+  try {
+    migrationRequired = await hasLegacyPrivateData()
+  } catch {
+    vaultStore().lock()
+    return {
+      ...vaultStore().status(),
+      state: 'error',
+      migrationRequired: true,
+      error: 'Sibyl could not safely inspect the legacy private-data store.'
+    }
+  }
+  if (status.state !== 'unlocked' || !migrationRequired) {
+    return { ...status, migrationRequired }
+  }
+  try {
+    // Preserve a verified ciphertext-only recovery generation before removing
+    // the final normal-access copies of the legacy plaintext.
+    await vaultStore().createBackup()
+    await removeLegacyPrivateData()
+    migrationRequired = await hasLegacyPrivateData()
+    if (migrationRequired) throw new Error('Legacy private data remains after cleanup.')
+    return { ...status, migrationRequired: false }
+  } catch {
+    // Do not hydrate the renderer while a verified encrypted copy and a
+    // plaintext legacy copy coexist. A subsequent passphrase unlock retries
+    // cleanup without rebuilding or overwriting the encrypted vault.
+    vaultStore().lock()
+    return {
+      ...vaultStore().status(),
+      state: 'error',
+      migrationRequired: true,
+      error:
+        'Your encrypted copy is safe, but Sibyl could not remove the old plaintext files. Close other apps using those files, then unlock again to retry.'
+    }
+  }
+}
+
+export async function initializePrivateVault(): Promise<PrivateVaultStatus> {
+  const status = await vaultStore().initialize()
+  cachedSettings = null
+  return finishLegacyMigration(status)
+}
+
+export async function privateVaultStatus(): Promise<PrivateVaultStatus> {
+  const status = vaultStore().status()
+  try {
+    return { ...status, migrationRequired: await hasLegacyPrivateData() }
+  } catch {
+    return {
+      ...status,
+      state: 'error',
+      migrationRequired: true,
+      error: 'Sibyl could not safely inspect the legacy private-data store.'
+    }
+  }
+}
+
+export async function setupPrivateVault(
+  recoveryPassphrase: string,
+  seamlessOnThisDevice: boolean
+): Promise<PrivateVaultStatus> {
+  const status = await vaultStore().setup(
+    recoveryPassphrase,
+    seamlessOnThisDevice,
+    await initialPrivateRecords()
+  )
+  cachedSettings = null
+  return finishLegacyMigration(status)
+}
+
+export async function unlockPrivateVault(
+  recoveryPassphrase: string
+): Promise<PrivateVaultStatus> {
+  const status = await vaultStore().unlockWithPassphrase(recoveryPassphrase)
+  cachedSettings = null
+  return finishLegacyMigration(status)
+}
+
+export async function unlockPrivateVaultWithPasskey(): Promise<PrivateVaultStatus> {
+  const status = await vaultStore().unlockWithPasskey()
+  cachedSettings = null
+  return finishLegacyMigration(status)
+}
+
+export function lockPrivateVault(): PrivateVaultStatus {
+  cachedSettings = null
+  vaultStore().lock()
+  return vaultStore().status()
+}
+
+export async function setPrivateVaultSeamless(
+  enabled: boolean
+): Promise<PrivateVaultStatus> {
+  const status = await vaultStore().setSeamlessOnThisDevice(enabled)
+  return { ...status, migrationRequired: await hasLegacyPrivateData() }
+}
+
+export async function setPrivateVaultPasskey(
+  enabled: boolean
+): Promise<PrivateVaultStatus> {
+  const status = await vaultStore().setPasskey(enabled)
+  return { ...status, migrationRequired: await hasLegacyPrivateData() }
+}
+
+export async function changePrivateVaultRecoveryPassphrase(
+  recoveryPassphrase: string
+): Promise<PrivateVaultStatus> {
+  const status = await vaultStore().changeRecoveryPassphrase(recoveryPassphrase)
+  return { ...status, migrationRequired: false }
+}
+
+export async function listPrivateVaultBackups(): Promise<PrivateVaultBackup[]> {
+  return vaultStore().listBackups()
+}
+
+export async function createPrivateVaultBackup(): Promise<void> {
+  await vaultStore().createBackup()
+}
+
+export async function verifyPrivateVaultRecovery(): Promise<{
+  currentRecords: number
+  validBackups: number
+}> {
+  return vaultStore().verifyRecovery()
+}
+
+export async function restorePrivateVaultBackup(id: string): Promise<void> {
+  await vaultStore().restoreBackup(id)
+  cachedSettings = null
+}
+
 let cachedSettings: AppSettings | null = null
 
 async function loadSettingsUnlocked(): Promise<AppSettings> {
   if (cachedSettings) return cachedSettings
-  const persisted = await readJSON<PersistedSettings | null>(settingsPath(), null)
+  const persisted = (await vaultStore().readJson('settings', 'main')) as PersistedSettings | null
   const base = defaultSettings()
   if (!persisted) {
     cachedSettings = base
@@ -210,10 +518,12 @@ async function loadSettingsUnlocked(): Promise<AppSettings> {
     load: { ...base.load, ...persisted.load },
     context: { ...base.context, ...persisted.context },
     tts: { ...base.tts, ...persisted.tts },
-    personas,
+    accessibility: { ...base.accessibility, ...persisted.accessibility },
+    personas: personas.map(normalizePersona),
     hfToken: decryptToken(persisted.hfTokenEnc),
     telemetry: false
   }
+  vaultStore().setBackupRetention(cachedSettings.backupRetention)
   return cachedSettings
 }
 
@@ -232,37 +542,16 @@ export async function setSettings(patch: Partial<AppSettings>): Promise<AppSetti
       load: { ...current.load, ...(patch.load ?? {}) },
       context: { ...current.context, ...(patch.context ?? {}) },
       tts: { ...current.tts, ...(patch.tts ?? {}) },
+      accessibility: {
+        ...current.accessibility,
+        ...(patch.accessibility ?? {})
+      },
+      backupRetention: patch.backupRetention ?? current.backupRetention,
       telemetry: false
     }
 
-    // Encrypt the token for persistence. If a non-null token can't be encrypted
-    // (OS secure storage unavailable / keychain error), don't silently drop it.
-    const hfTokenEnc = encryptToken(next.hfToken)
-    const tokenStoreFailed = next.hfToken != null && hfTokenEnc == null
-    if (tokenStoreFailed) {
-      throw new Error(
-        'Could not store your Hugging Face token securely: this system’s secure ' +
-          'storage (OS keychain) is unavailable, so the token was not saved.'
-      )
-    }
-
-    const persisted: PersistedSettings = {
-      modelsDir: next.modelsDir,
-      generation: next.generation,
-      load: next.load,
-      context: next.context,
-      theme: next.theme,
-      accent: next.accent,
-      gpu: next.gpu,
-      verifyDownloads: next.verifyDownloads,
-      personas: next.personas,
-      promptPresets: next.promptPresets,
-      generationProfiles: next.generationProfiles,
-      tts: next.tts,
-      telemetry: false,
-      hfTokenEnc
-    }
-    await atomicWrite(settingsPath(), JSON.stringify(persisted, null, 2))
+    vaultStore().setBackupRetention(next.backupRetention)
+    await vaultStore().writeJson('settings', 'main', persistedSettings(next))
 
     // Only expose the new snapshot after the rename has durably succeeded.
     cachedSettings = next
@@ -306,6 +595,34 @@ async function latestRecoveryCopy(filePath: string): Promise<string | null> {
     return matches.length ? path.join(path.dirname(filePath), matches[matches.length - 1]) : null
   } catch {
     return null
+  }
+}
+
+function persistedSettings(settings: AppSettings): PersistedSettings {
+  const hfTokenEnc = encryptToken(settings.hfToken)
+  if (settings.hfToken != null && hfTokenEnc == null) {
+    throw new Error(
+      'Could not store your Hugging Face token securely: this system’s secure ' +
+        'storage (OS keychain) is unavailable, so the token was not saved.'
+    )
+  }
+  return {
+    modelsDir: settings.modelsDir,
+    generation: settings.generation,
+    load: settings.load,
+    context: settings.context,
+    theme: settings.theme,
+    accent: settings.accent,
+    gpu: settings.gpu,
+    verifyDownloads: settings.verifyDownloads,
+    personas: settings.personas,
+    promptPresets: settings.promptPresets,
+    generationProfiles: settings.generationProfiles,
+    tts: settings.tts,
+    accessibility: settings.accessibility,
+    backupRetention: settings.backupRetention,
+    telemetry: false,
+    hfTokenEnc
   }
 }
 
@@ -623,55 +940,32 @@ export function recoveryPathFor(resource: StorageIssue['resource']): string | nu
 // Conversations
 // ---------------------------------------------------------------------------
 
-function convFile(id: string): string {
-  // Reject malformed ids instead of sanitizing distinct inputs into the same
-  // filesystem path.
-  return path.join(conversationsDir(), `${parseCanonicalId(id, 'conversationId')}.json`)
-}
-
-/** Move a corrupt conversation file aside so it stops breaking loads but isn't lost. */
-async function quarantineFile(filePath: string): Promise<void> {
-  await fs.rename(filePath, `${filePath}.corrupt`).catch(() => {})
-}
-
-/**
- * Read + validate one conversation file. Returns null (and quarantines the file)
- * when it can't be parsed or fails schema validation, so a single corrupt file
- * can't crash the app or take down the whole list.
- */
-async function loadConversation(filePath: string): Promise<Conversation | null> {
-  let raw: string
-  try {
-    raw = await fs.readFile(filePath, 'utf8')
-  } catch {
-    return null // missing / unreadable — not corrupt, just absent
-  }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    await quarantineFile(filePath)
-    return null
-  }
-  try {
-    return parseConversation(parsed)
-  } catch {
-    await quarantineFile(filePath)
-    return null
-  }
-}
-
 export async function listConversations(): Promise<Conversation[]> {
-  await ensureDir(conversationsDir())
-  const files = await fs.readdir(conversationsDir())
+  const records = await vaultStore().listJson('conversation')
+  const settings = await getSettings()
   const out: Conversation[] = []
-  for (const f of files) {
-    if (!f.endsWith('.json')) continue
-    const id = f.slice(0, -5)
-    const conv = await conversationQueue(id).run(() =>
-      loadConversation(path.join(conversationsDir(), f))
-    )
-    if (conv) out.push(conv)
+  for (const record of records) {
+    const parsed = parseConversation(record.value)
+    const candidate = migrateConversationIdentity(parsed, settings.personas)
+    if (JSON.stringify(candidate) === JSON.stringify(parsed)) {
+      out.push(candidate)
+      continue
+    }
+
+    // A list can overlap a renderer save. Re-read and migrate while holding the
+    // same per-conversation queue as save/delete so an older list snapshot can
+    // never overwrite a newer durable snapshot.
+    const migrated = await conversationQueue(parsed.id).run(async () => {
+      const currentValue = await vaultStore().readJson('conversation', parsed.id)
+      if (currentValue == null) return null
+      const current = parseConversation(currentValue)
+      const latest = migrateConversationIdentity(current, settings.personas)
+      if (JSON.stringify(latest) !== JSON.stringify(current)) {
+        await vaultStore().writeJson('conversation', latest.id, latest)
+      }
+      return latest
+    })
+    if (migrated) out.push(migrated)
   }
   // Most recently updated first.
   out.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
@@ -679,26 +973,95 @@ export async function listConversations(): Promise<Conversation[]> {
 }
 
 export async function getConversation(id: string): Promise<Conversation | null> {
-  return conversationQueue(id).run(() => loadConversation(convFile(id)))
+  const canonical = parseCanonicalId(id, 'conversationId')
+  return conversationQueue(canonical).run(async () => {
+    const value = await vaultStore().readJson('conversation', canonical)
+    if (value == null) return null
+    const parsed = parseConversation(value)
+    const migrated = migrateConversationIdentity(parsed, (await getSettings()).personas)
+    if (JSON.stringify(migrated) !== JSON.stringify(parsed)) {
+      await vaultStore().writeJson('conversation', canonical, migrated)
+    }
+    return migrated
+  })
 }
 
 export async function saveConversation(conversation: Conversation): Promise<void> {
   await conversationQueue(conversation.id).run(async () => {
-    const filePath = convFile(conversation.id)
-    const durable = await loadConversation(filePath)
-    if (durable && durable.updatedAt > conversation.updatedAt) {
+    const migrated = migrateConversationIdentity(conversation, (await getSettings()).personas)
+    const existing = await vaultStore().readJson('conversation', conversation.id)
+    const durable = existing == null ? null : parseConversation(existing)
+    if (durable && durable.updatedAt > migrated.updatedAt) {
       throw new Error('A newer conversation snapshot is already saved.')
     }
-    await atomicWrite(filePath, JSON.stringify(conversation, null, 2))
+    await vaultStore().writeJson('conversation', migrated.id, migrated)
   })
 }
 
 export async function deleteConversation(id: string): Promise<void> {
-  await conversationQueue(id).run(async () => {
-    try {
-      await fs.unlink(convFile(id))
-    } catch (err) {
-      if (errorCode(err) !== 'ENOENT') throw err
+  const canonical = parseCanonicalId(id, 'conversationId')
+  await conversationQueue(canonical).run(async () => {
+    await vaultStore().delete('conversation', canonical)
+  })
+}
+
+/**
+ * Commit a validated portable import as one authenticated vault-index swap.
+ * Conversation bundles retain this device's global preferences; full-library
+ * bundles restore portable preferences but never replace paths or credentials.
+ */
+export async function applyPortableImport(
+  prepared: PreparedPortableImport
+): Promise<{ conversationIds: string[] }> {
+  return settingsQueue.run(async () => {
+    const current = await loadSettingsUnlocked()
+    const { personas: _portablePersonas, ...portableSettings } = prepared.settings
+    const importedSettings: RendererSettingsPatch =
+      prepared.scope === 'library' ? portableSettings : {}
+    const mergedPersonas = [...current.personas, ...prepared.personas]
+    const next: AppSettings = {
+      ...current,
+      ...importedSettings,
+      generation: {
+        ...current.generation,
+        ...(importedSettings.generation ?? {})
+      },
+      load: {
+        ...current.load,
+        ...(importedSettings.load ?? {})
+      },
+      context: {
+        ...current.context,
+        ...(importedSettings.context ?? {})
+      },
+      tts: {
+        ...current.tts,
+        ...(importedSettings.tts ?? {})
+      },
+      accessibility: {
+        ...current.accessibility,
+        ...(importedSettings.accessibility ?? {})
+      },
+      personas: mergedPersonas,
+      modelsDir: current.modelsDir,
+      hfToken: current.hfToken,
+      telemetry: false
     }
+    const records: InitialPrivateRecord[] = [
+      {
+        kind: 'settings',
+        logicalId: 'main',
+        value: persistedSettings(next)
+      },
+      ...prepared.conversations.map((conversation) => ({
+        kind: 'conversation',
+        logicalId: conversation.id,
+        value: conversation
+      }))
+    ]
+    await vaultStore().writeJsonBatch(records)
+    vaultStore().setBackupRetention(next.backupRetention)
+    cachedSettings = next
+    return { conversationIds: prepared.conversations.map((conversation) => conversation.id) }
   })
 }

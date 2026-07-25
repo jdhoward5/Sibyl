@@ -51,14 +51,21 @@ fired on `did-finish-load`). **Requires `npm run build` first** (it runs `out/`)
 
    ```bash
    OUT=$(mktemp -d)
+   DATA=$(mktemp -d)
    SIBYL_SMOKE=1 \
+   SIBYL_SMOKE_ISOLATED=1 \
    SIBYL_SMOKE_MODEL="C:/path/to/model.gguf" \
    SIBYL_SMOKE_OUT="$OUT" \
-   ./node_modules/electron/dist/electron.exe . 2>&1 \
+   ./node_modules/electron/dist/electron.exe . "--user-data-dir=$DATA" 2>&1 \
      | grep -iE "smoke|error|fail|cuda|gpu|architecture"
    echo "exit: ${PIPESTATUS[0]}"
    ls "$OUT"   # → sibyl-smoke-chat.png
    ```
+
+   Model smoke tests intentionally refuse to run unless their user-data directory
+   is a child of the OS temp directory. The harness creates and unlocks a
+   throwaway encrypted vault there; it never writes smoke personas or
+   conversations into the real Sibyl profile.
 
    A pass prints `[smoke] ✅ IN-APP CHAT PASSED (2 conversations)` and a result
    line with `tokensPerSecond` / `contextTokens`.

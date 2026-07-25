@@ -6,8 +6,24 @@
 // can use it and it stays unit-testable (`scene.test.ts`). The engine maps the
 // neutral `SceneTurn`s here onto node-llama-cpp's chat-history items.
 
-import type { ChatMessage, Conversation, Persona, UserCharacter } from './types'
-import { findPersona } from './personas'
+import type {
+  ChatMessage,
+  Conversation,
+  Persona,
+  RoleplayState,
+  SceneDirection,
+  UserCharacter
+} from './types'
+import {
+  activeDirectionsForSpeaker,
+  directionPrompt,
+  messageContentForSpeaker,
+  personaPromptForSpeaker,
+  publicCastDescription,
+  publicRelationshipPrompt,
+  resolveConversationPersona,
+  roleplayStatePrompt
+} from './roleplay'
 
 /** A scene needs at least this many AI characters to be a conversation-with-itself. */
 export const MIN_SCENE_CAST = 2
@@ -17,15 +33,15 @@ export function isScene(conv: Pick<Conversation, 'cast'> | null | undefined): bo
   return (conv?.cast?.length ?? 0) >= MIN_SCENE_CAST
 }
 
-/** Resolve a conversation's cast ids to personas (in cast order, dropping any that no longer exist). */
+/** Resolve a cast from frozen snapshots first, with the library as a legacy fallback. */
 export function sceneCast(
-  conv: Pick<Conversation, 'cast'> | null | undefined,
+  conv: Pick<Conversation, 'cast' | 'castSnapshots' | 'personaOverrides'> | null | undefined,
   personas: Persona[] | undefined
 ): Persona[] {
   if (!conv?.cast?.length) return []
   const out: Persona[] = []
   for (const id of conv.cast) {
-    const p = findPersona(personas, id)
+    const p = resolveConversationPersona(conv, id, personas)
     if (p && !out.some((q) => q.id === p.id)) out.push(p)
   }
   return out
@@ -81,9 +97,10 @@ export interface BeatPrompt {
 function otherLine(
   m: ChatMessage,
   cast: Persona[],
-  userName: string
+  userName: string,
+  content: string
 ): string {
-  const content = m.content.trim()
+  content = content.trim()
   if (m.director) return `[Director: ${content}]`
   if (m.role === 'user') return `${userName}: ${content}`
   const name =
@@ -96,11 +113,18 @@ function buildSystem(
   speaker: Persona,
   cast: Persona[],
   userCharacter: UserCharacter | undefined,
-  scenePremise: string | undefined
+  scenePremise: string | undefined,
+  sceneInstruction: string | undefined,
+  roleplayState: RoleplayState | undefined,
+  knowledgeMode: Conversation['knowledgeMode'],
+  directions: SceneDirection[] | undefined,
+  compactionSummary: string | undefined
 ): string {
   const lines: string[] = []
   const brief = speaker.brief?.trim()
   if (brief) lines.push(brief, '')
+  const identity = personaPromptForSpeaker(speaker, cast)
+  if (identity) lines.push(identity, '')
 
   const who = speaker.role?.trim() ? `${speaker.name}, ${speaker.role.trim()}` : speaker.name
   lines.push(
@@ -116,7 +140,8 @@ function buildSystem(
   lines.push('', 'Characters in the scene:')
   for (const c of cast) {
     const tag = c.id === speaker.id ? ' (you)' : ''
-    const role = c.role?.trim() ? ` — ${c.role.trim()}` : ''
+    const description = publicCastDescription(c)
+    const role = description ? ` — ${description}` : ''
     lines.push(`- ${c.name}${tag}${role}`)
   }
   const ucName = userCharacter?.name?.trim()
@@ -127,6 +152,25 @@ function buildSystem(
 
   const premise = scenePremise?.trim()
   if (premise) lines.push('', `Setting: ${premise}`)
+  const instruction = sceneInstruction?.trim()
+  if (instruction) {
+    lines.push(
+      '',
+      'Scene instruction (applies to every character and the whole scene):',
+      instruction
+    )
+  }
+  const publicRelationships = publicRelationshipPrompt(cast)
+  if (publicRelationships) lines.push('', 'Public relationships:', publicRelationships)
+  const continuity = roleplayStatePrompt(
+    { roleplayState, knowledgeMode },
+    speaker.id,
+    roleplayState?.recap?.trim() !== compactionSummary?.trim()
+  )
+  if (continuity) lines.push('', 'Known continuity:', continuity)
+  const activeDirections = activeDirectionsForSpeaker(directions, speaker.id)
+  const directionText = directionPrompt(activeDirections)
+  if (directionText) lines.push('', 'Active director guidance:', directionText)
 
   return lines.join('\n')
 }
@@ -147,8 +191,24 @@ export function buildBeatPrompt(params: {
   cast: Persona[]
   userCharacter?: UserCharacter
   scenePremise?: string
+  sceneInstruction?: string
+  roleplayState?: RoleplayState
+  knowledgeMode?: Conversation['knowledgeMode']
+  directions?: SceneDirection[]
+  compactionSummary?: string
 }): BeatPrompt {
-  const { messages, speaker, cast, userCharacter, scenePremise } = params
+  const {
+    messages,
+    speaker,
+    cast,
+    userCharacter,
+    scenePremise,
+    sceneInstruction,
+    roleplayState,
+    knowledgeMode = 'scoped',
+    directions,
+    compactionSummary
+  } = params
   const userName = userDisplayName(userCharacter)
 
   // Coalesce into a flat list of user/model turns. "Other" lines accumulate into
@@ -162,12 +222,16 @@ export function buildBeatPrompt(params: {
     }
   }
   for (const m of messages) {
-    if (m.role === 'system' || !m.content.trim()) continue
+    // Structured directions are injected above according to target/lifetime.
+    // Keep only legacy director notes in transcript replay.
+    if (m.director && m.directionId) continue
+    const visibleContent = messageContentForSpeaker(m, speaker.id, knowledgeMode)
+    if (m.role === 'system' || !visibleContent.trim()) continue
     if (m.role === 'assistant' && m.speakerId === speaker.id) {
       flush()
-      items.push({ role: 'model', text: m.content.trim() })
+      items.push({ role: 'model', text: visibleContent.trim() })
     } else {
-      buffer.push(otherLine(m, cast, userName))
+      buffer.push(otherLine(m, cast, userName, visibleContent))
     }
   }
   flush()
@@ -206,7 +270,17 @@ export function buildBeatPrompt(params: {
   }
 
   return {
-    system: buildSystem(speaker, cast, userCharacter, scenePremise),
+    system: buildSystem(
+      speaker,
+      cast,
+      userCharacter,
+      scenePremise,
+      sceneInstruction,
+      roleplayState,
+      knowledgeMode,
+      directions,
+      compactionSummary
+    ),
     history,
     prompt,
     stopTriggers

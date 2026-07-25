@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { actions, useStore } from '../../store'
-import { findPersona } from '@shared/personas'
+import { resolveConversationPersona } from '@shared/roleplay'
 import { isScene, sceneCast } from '@shared/scene'
 import { PlusIcon, TrashIcon, EditIcon, SearchIcon } from '../../lib/icons'
 
@@ -62,7 +62,11 @@ export function ConversationList() {
         </div>
       </div>
       <div className="px-4 pb-2 pt-1 eyebrow">// Threads</div>
-      <div className="flex-1 overflow-y-auto px-2.5 pb-2">
+      <div
+        role="list"
+        aria-label="Threads"
+        className="flex-1 overflow-y-auto px-2.5 pb-2"
+      >
         {conversations.length === 0 && (
           <p className="px-3 py-6 text-center text-[12px] text-sibyl-muted/70">No threads yet.</p>
         )}
@@ -74,7 +78,7 @@ export function ConversationList() {
           const snippet =
             q && !titleMatches ? (c.messages.map((m) => matchSnippet(m.content, q)).find(Boolean) ?? null) : null
           const active = c.id === activeId
-          const persona = findPersona(personas, c.personaId)
+          const persona = resolveConversationPersona(c, c.personaId, personas)
           const scene = isScene(c)
           const lead = scene
             ? `Scene · ${sceneCast(c, personas).length} cast`
@@ -89,42 +93,48 @@ export function ConversationList() {
           return (
             <div
               key={c.id}
-              onClick={() => actions.selectConversation(c.id)}
-              className={`group relative mb-0.5 cursor-pointer rounded-md px-3 py-2.5 transition-colors ${
+              role="listitem"
+              className={`group relative mb-0.5 rounded-md transition-colors ${
                 active ? 'bg-sibyl-surface-2' : 'hover:bg-sibyl-surface'
               }`}
             >
               {active && <span className="absolute left-0 top-2.5 bottom-2.5 w-0.5 rounded bg-sibyl-accent" />}
               {editingId === c.id ? (
-                <input
-                  autoFocus
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  onClick={(e) => e.stopPropagation()}
-                  onBlur={() => {
-                    actions.renameConversation(c.id, draft)
-                    setEditingId(null)
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
+                <div className="px-3 py-2.5">
+                  <input
+                    autoFocus
+                    aria-label={`Rename ${c.title}`}
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onBlur={() => {
                       actions.renameConversation(c.id, draft)
                       setEditingId(null)
-                    } else if (e.key === 'Escape') {
-                      setEditingId(null)
-                    }
-                  }}
-                  className="input h-6 w-full px-1.5 py-0 text-[13px]"
-                />
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        actions.renameConversation(c.id, draft)
+                        setEditingId(null)
+                      } else if (e.key === 'Escape') {
+                        setEditingId(null)
+                      }
+                    }}
+                    className="input h-6 w-full px-1.5 py-0 text-[13px]"
+                  />
+                </div>
               ) : (
-                <div className="min-w-0">
+                <button
+                  onClick={() => actions.selectConversation(c.id)}
+                  aria-current={active ? 'true' : undefined}
+                  className="block w-full min-w-0 rounded-md px-3 py-2.5 pr-16 text-left"
+                >
                   <div className={`truncate text-[13px] ${active ? 'font-semibold text-sibyl-text' : 'font-medium text-sibyl-secondary'}`}>
                     {c.title}
                   </div>
-                  <div className="mt-0.5 truncate font-mono text-[10.5px] text-sibyl-muted">{meta}</div>
-                  {snippet && <div className="mt-0.5 truncate text-[11px] text-sibyl-muted/80">{snippet}</div>}
-                </div>
+                  <div className="mt-0.5 truncate font-mono text-[10.5px] text-sibyl-secondary">{meta}</div>
+                  {snippet && <div className="mt-0.5 truncate text-[11px] text-sibyl-secondary">{snippet}</div>}
+                </button>
               )}
-              <div className="absolute right-2 top-2 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+              <div className="absolute right-2 top-2 flex items-center gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
                 <button
                   onClick={(e) => {
                     e.stopPropagation()

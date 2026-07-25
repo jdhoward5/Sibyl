@@ -55,9 +55,18 @@ function MessageImpl({
   const [draft, setDraft] = useState('')
   const turnBusy = useStore((s) => rendererTurnIsBusy(s.turnOperation))
   const streamStats = useStore((s) => s.streamStats)
-  const showSpeak = useStore(canSpeak)
+  const showSpeak = useStore((state) => canSpeak(state, message.id))
   const speaking = useStore((s) => s.speakingMessageId === message.id)
   const isUser = message.role === 'user'
+  const privateToSpeaker = Boolean(
+    message.speakerId &&
+      message.segments?.length &&
+      message.segments.every(
+        (segment) =>
+          segment.visibility.kind === 'private' &&
+          segment.visibility.characterIds.includes(message.speakerId!)
+      )
+  )
 
   // --- director note — out-of-character stage direction --------------------
   if (message.director) {
@@ -91,7 +100,7 @@ function MessageImpl({
             <span className={`${LABEL} mr-1.5 not-italic text-sibyl-accent-2`}>Director</span>
             {message.content}
           </p>
-          <div className="flex shrink-0 items-center gap-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+          <div className="flex shrink-0 items-center gap-1.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
             <button
               onClick={() => {
                 setDraft(message.content)
@@ -182,7 +191,7 @@ function MessageImpl({
         <p className="selectable whitespace-pre-wrap text-[15.5px] italic leading-[1.7] text-sibyl-secondary">
           {message.content}
         </p>
-        <div className="mt-2 flex items-center gap-3 opacity-0 transition-opacity group-hover:opacity-100">
+        <div className="mt-2 flex items-center gap-3 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
           <button onClick={copy} className={ACTION}>
             {copied ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
             {copied ? 'Copied' : 'Copy'}
@@ -212,6 +221,11 @@ function MessageImpl({
         >
           {speaker}
         </span>
+        {privateToSpeaker && (
+          <span className="rounded-full border border-violet-400/30 bg-violet-400/10 px-1.5 py-0.5 font-mono text-[9px] uppercase text-violet-200">
+            Private · only {speaker} knows
+          </span>
+        )}
       </div>
       <div className="min-w-0">
         {message.content ? (
@@ -263,7 +277,7 @@ function MessageImpl({
 
         {!streaming && (message.content || message.stats || message.error) && (
           <div
-            className={`mt-1.5 flex items-center gap-3 transition-opacity group-hover:opacity-100 ${
+            className={`mt-1.5 flex items-center gap-3 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 ${
               speaking ? 'opacity-100' : 'opacity-0'
             }`}
           >
@@ -296,8 +310,25 @@ function MessageImpl({
             <button onClick={() => actions.deleteMessage(message.id)} disabled={turnBusy} className={ACTION_DANGER}>
               <TrashIcon size={12} /> Delete
             </button>
+            {message.speakerId && message.content && (
+              <button
+                onClick={() =>
+                  void actions.setMessageVisibility(
+                    message.id,
+                    privateToSpeaker
+                      ? { kind: 'public' }
+                      : { kind: 'private', characterIds: [message.speakerId!] }
+                  )
+                }
+                disabled={turnBusy}
+                className={ACTION}
+                title="The human sees all content; this controls what other characters receive."
+              >
+                {privateToSpeaker ? 'Make public' : 'Make private'}
+              </button>
+            )}
             {message.stats && (
-              <span className="text-[11px] text-sibyl-muted/70">
+              <span className="text-[11px] text-sibyl-muted">
                 {message.stats.completionTokens} tokens · {message.stats.tokensPerSecond.toFixed(1)} tok/s
               </span>
             )}

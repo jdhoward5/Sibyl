@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { promises as fs } from 'node:fs'
+import { freemem, totalmem } from 'node:os'
 import type { IpcMainInvokeEvent } from 'electron'
 import {
   IPC,
@@ -34,11 +35,23 @@ import {
   listInstalledModels,
   listInstalledVoices,
   listStorageIssues,
+  changePrivateVaultRecoveryPassphrase,
+  createPrivateVaultBackup,
+  listPrivateVaultBackups,
+  lockPrivateVault,
+  privateVaultStatus,
   recoveryPathFor,
   relocateInstalledModel,
+  restorePrivateVaultBackup,
   saveConversation,
+  setPrivateVaultSeamless,
+  setPrivateVaultPasskey,
   setSettings,
-  settingsForRenderer
+  setupPrivateVault,
+  settingsForRenderer,
+  unlockPrivateVault,
+  unlockPrivateVaultWithPasskey,
+  verifyPrivateVaultRecovery
 } from './store'
 import {
   assertChatAdvanceState,
@@ -54,13 +67,25 @@ import {
   parseHfToken,
   parseModelId,
   parseNoArgs,
+  parsePortableImportToken,
   parseRendererSettingsPatch,
   parseRepoFilename,
   parseRepoId,
+  parseRecoveryPassphrase,
   parseSearchQuery,
   parseSortKey,
-  parseTtsSpeakRequest
+  parseTtsSpeakRequest,
+  parseVaultBackupId,
+  parseVaultSetupRequest
 } from '@shared/validation'
+import {
+  commitPortableImport,
+  clearPortableImports,
+  discardPortableImport,
+  exportPortableConversation,
+  exportPortableLibrary,
+  inspectPortableImport
+} from './portableService'
 import {
   isAllowedRendererUrl,
   isTrustedRendererFrame,
@@ -121,6 +146,174 @@ function broadcast(channel: string, payload: unknown, policy: RendererUrlPolicy)
 }
 
 export function registerIpc(policy: RendererUrlPolicy): void {
+  // --- Encrypted private-data vault ---------------------------------------
+  handle(IPC.vaultStatus, policy, parseNoArgs, async () => privateVaultStatus())
+  handle(
+    IPC.vaultSetup,
+    policy,
+    (args) => parseArgs(args, parseVaultSetupRequest),
+    async (_event, request) =>
+      setupPrivateVault(request.recoveryPassphrase, request.seamlessOnThisDevice)
+  )
+  handle(
+    IPC.vaultUnlock,
+    policy,
+    (args) => parseArgs(args, parseRecoveryPassphrase),
+    async (_event, recoveryPassphrase) => unlockPrivateVault(recoveryPassphrase)
+  )
+  handle(
+    IPC.vaultUnlockPasskey,
+    policy,
+    parseNoArgs,
+    async () => unlockPrivateVaultWithPasskey()
+  )
+  handle(
+    IPC.vaultSetSeamless,
+    policy,
+    (args) =>
+      parseArgs<[boolean]>(args, (value) => {
+        if (typeof value !== 'boolean') throw new Error('Invalid IPC argument enabled: expected a boolean.')
+        return value
+      }),
+    async (_event, enabled) => setPrivateVaultSeamless(enabled)
+  )
+  handle(
+    IPC.vaultSetPasskey,
+    policy,
+    (args) =>
+      parseArgs<[boolean]>(args, (value) => {
+        if (typeof value !== 'boolean') {
+          throw new Error(
+            'Invalid IPC argument enabled: expected a boolean.'
+          )
+        }
+        return value
+      }),
+    async (_event, enabled) => setPrivateVaultPasskey(enabled)
+  )
+  handle(IPC.vaultLock, policy, parseNoArgs, async (event) => {
+    clearPortableImports()
+    await tts.dispose()
+    await engine.unload()
+    const status = lockPrivateVault()
+    setTimeout(() => {
+      if (!event.sender.isDestroyed()) event.sender.reload()
+    }, 50)
+    return status
+  })
+  handle(
+    IPC.vaultChangeRecoveryPassphrase,
+    policy,
+    (args) => parseArgs(args, parseRecoveryPassphrase),
+    async (_event, recoveryPassphrase) =>
+      changePrivateVaultRecoveryPassphrase(recoveryPassphrase)
+  )
+  handle(IPC.vaultListBackups, policy, parseNoArgs, async () => listPrivateVaultBackups())
+  handle(IPC.vaultCreateBackup, policy, parseNoArgs, async () => {
+    await createPrivateVaultBackup()
+  })
+  handle(IPC.vaultVerifyRecovery, policy, parseNoArgs, async () =>
+    verifyPrivateVaultRecovery()
+  )
+  handle(
+    IPC.vaultRestoreBackup,
+    policy,
+    (args) => parseArgs(args, parseVaultBackupId),
+    async (event, id) => {
+      clearPortableImports()
+      await tts.dispose()
+      await engine.unload()
+      await restorePrivateVaultBackup(id)
+      setTimeout(() => {
+        if (!event.sender.isDestroyed()) event.sender.reload()
+      }, 50)
+    }
+  )
+
+  // --- Encrypted portable bundles ----------------------------------------
+  handle(
+    IPC.portableExportConversation,
+    policy,
+    (args) =>
+      parseArgs<[string, string]>(
+        args,
+        (value) => parseCanonicalId(value, 'conversationId'),
+        parseRecoveryPassphrase
+      ),
+    async (_event, conversationId, recoveryPassphrase) => {
+      const encrypted = await exportPortableConversation(
+        conversationId,
+        recoveryPassphrase
+      )
+      const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+      const options: Electron.SaveDialogOptions = {
+        defaultPath: `Sibyl-conversation-${new Date().toISOString().slice(0, 10)}.sibyl`,
+        filters: [{ name: 'Encrypted Sibyl bundle', extensions: ['sibyl'] }]
+      }
+      const result = win
+        ? await dialog.showSaveDialog(win, options)
+        : await dialog.showSaveDialog(options)
+      if (result.canceled || !result.filePath) return { saved: false }
+      await fs.writeFile(result.filePath, encrypted, { encoding: 'utf8', mode: 0o600 })
+      return { saved: true, path: result.filePath }
+    }
+  )
+  handle(
+    IPC.portableExportLibrary,
+    policy,
+    (args) => parseArgs<[string]>(args, parseRecoveryPassphrase),
+    async (_event, recoveryPassphrase) => {
+      const encrypted = await exportPortableLibrary(recoveryPassphrase)
+      const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+      const options: Electron.SaveDialogOptions = {
+        defaultPath: `Sibyl-library-${new Date().toISOString().slice(0, 10)}.sibyl`,
+        filters: [{ name: 'Encrypted Sibyl bundle', extensions: ['sibyl'] }]
+      }
+      const result = win
+        ? await dialog.showSaveDialog(win, options)
+        : await dialog.showSaveDialog(options)
+      if (result.canceled || !result.filePath) return { saved: false }
+      await fs.writeFile(result.filePath, encrypted, { encoding: 'utf8', mode: 0o600 })
+      return { saved: true, path: result.filePath }
+    }
+  )
+  handle(
+    IPC.portableInspectImport,
+    policy,
+    (args) => parseArgs<[string]>(args, parseRecoveryPassphrase),
+    async (_event, recoveryPassphrase) => {
+      const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+      const options: Electron.OpenDialogOptions = {
+        title: 'Open an encrypted Sibyl bundle',
+        properties: ['openFile'],
+        filters: [{ name: 'Encrypted Sibyl bundle', extensions: ['sibyl'] }]
+      }
+      const result = win
+        ? await dialog.showOpenDialog(win, options)
+        : await dialog.showOpenDialog(options)
+      if (result.canceled || !result.filePaths[0]) return null
+      return inspectPortableImport(result.filePaths[0], recoveryPassphrase)
+    }
+  )
+  handle(
+    IPC.portableCommitImport,
+    policy,
+    (args) => parseArgs<[string]>(args, parsePortableImportToken),
+    async (_event, token) => {
+      tts.stop()
+      await engine.unload()
+      return commitPortableImport(token)
+    }
+  )
+  handle(
+    IPC.portableDiscardImport,
+    policy,
+    (args) => parseArgs<[string]>(args, parsePortableImportToken),
+    async (_event, token) => {
+      discardPortableImport(token)
+    }
+  )
+
   // --- Hugging Face -------------------------------------------------------
   handle(
     IPC.hfSearch,
@@ -221,6 +414,22 @@ export function registerIpc(policy: RendererUrlPolicy): void {
     // Generate one scene beat; streaming events flow over the same IPC.chatEvent.
     void engine.generateBeat(conversation, req.speakerId, req.assistantMessageId, req.options).catch(() => {})
   })
+  handle(
+    IPC.chatDirect,
+    policy,
+    (args) => parseArgs<[string]>(args, (value) => parseCanonicalId(value, 'conversationId')),
+    async (_e, conversationId) => {
+      const conversation = await getConversation(conversationId)
+      if (!conversation) throw new Error(`Conversation not found: ${conversationId}`)
+      return engine.directScene(conversation)
+    }
+  )
+  handle(
+    IPC.chatDirectAbort,
+    policy,
+    (args) => parseArgs<[string]>(args, (value) => parseCanonicalId(value, 'conversationId')),
+    async (_e, conversationId) => ({ aborted: engine.abortSceneDirector(conversationId) })
+  )
   handle(IPC.chatAbort, policy, (args) => parseArgs<[ChatAbortRequest]>(args, parseChatAbortRequest), async (_e, req) => {
     return { aborted: engine.abortGeneration(req) }
   })
@@ -319,6 +528,8 @@ export function registerIpc(policy: RendererUrlPolicy): void {
       node: process.versions.node,
       platform: process.platform,
       modelsDir: settings.modelsDir,
+      systemMemoryTotalBytes: totalmem(),
+      systemMemoryFreeBytes: freemem(),
       secureStorageAvailable: isSecureStorageAvailable()
     }
   })

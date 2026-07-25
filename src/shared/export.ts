@@ -18,7 +18,28 @@ const speakerLabel = (m: ChatMessage): string => {
 
 /** Turns rendered into the document — skip the empty assistant placeholder + system turns. */
 function exportableMessages(conv: Conversation): ChatMessage[] {
-  return conv.messages.filter((m) => m.role !== 'system' && m.content.trim())
+  return conv.messages.filter(
+    (message) =>
+      message.role !== 'system' &&
+      (message.content.trim() ||
+        message.segments?.some((segment) => segment.content.trim()))
+  )
+}
+
+function labelledContent(message: ChatMessage, markdown: boolean): string {
+  if (!message.segments?.length) {
+    return `${markdown ? '**[Public]**' : '[Public]'}\n${message.content.trim()}`
+  }
+  return message.segments
+    .filter((segment) => segment.content.trim())
+    .map((segment) => {
+      const visibility =
+        segment.visibility.kind === 'public'
+          ? 'Public'
+          : `Private → ${segment.visibility.characterIds.join(', ')}`
+      return `${markdown ? `**[${visibility}]**` : `[${visibility}]`}\n${segment.content.trim()}`
+    })
+    .join('\n\n')
 }
 
 export function conversationToMarkdown(conv: Conversation): string {
@@ -26,7 +47,7 @@ export function conversationToMarkdown(conv: Conversation): string {
   const summary = conv.compaction?.summary?.trim()
   if (summary) lines.push(`> **Earlier conversation summary:** ${summary}`, '')
   for (const m of exportableMessages(conv)) {
-    lines.push(`**${speakerLabel(m)}:**`, '', m.content.trim(), '')
+    lines.push(`**${speakerLabel(m)}:**`, '', labelledContent(m, true), '')
   }
   return lines.join('\n').trimEnd() + '\n'
 }
@@ -36,7 +57,7 @@ export function conversationToText(conv: Conversation): string {
   const summary = conv.compaction?.summary?.trim()
   if (summary) lines.push(`[Earlier conversation summary] ${summary}`, '')
   for (const m of exportableMessages(conv)) {
-    lines.push(`${speakerLabel(m)}:`, m.content.trim(), '')
+    lines.push(`${speakerLabel(m)}:`, labelledContent(m, false), '')
   }
   return lines.join('\n').trimEnd() + '\n'
 }

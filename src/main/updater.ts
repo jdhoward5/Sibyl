@@ -1,7 +1,10 @@
 import { EventEmitter } from 'node:events'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import { app, autoUpdater } from 'electron'
 import type { UpdateStatus } from '@shared/types'
 import { teardownGpu } from './shutdown'
+import { verifyWindowsReleaseFeed } from './releaseVerification'
 
 /**
  * Auto-update via Electron's native `autoUpdater` — which *is* Squirrel.Windows.
@@ -82,11 +85,32 @@ class Updater extends EventEmitter {
       return this.status
     }
     this.init()
-    if (this.status.state === 'error') return this.status
+    // A feed-setup failure leaves initialization false. Transient provenance
+    // or native-updater errors must remain retryable on the next manual check.
+    if (!this.initialized) return this.status
     try {
+      this.set({ state: 'checking', error: undefined, version: undefined })
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 15_000)
+      try {
+        const trustedPublicKey = readFileSync(
+          path.join(app.getAppPath(), 'build', 'release-manifest-public.pem')
+        )
+        await verifyWindowsReleaseFeed({
+          baseUrl: FEED_URL,
+          trustedPublicKey,
+          signal: controller.signal
+        })
+      } finally {
+        clearTimeout(timeout)
+      }
       autoUpdater.checkForUpdates()
     } catch (err) {
-      this.set({ state: 'error', error: err instanceof Error ? err.message : String(err) })
+      const detail = err instanceof Error ? err.message : String(err)
+      this.set({
+        state: 'error',
+        error: `Update provenance verification failed: ${detail}`
+      })
     }
     return this.status
   }

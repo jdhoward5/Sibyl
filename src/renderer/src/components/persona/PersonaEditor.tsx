@@ -1,11 +1,12 @@
 import { useState } from 'react'
-import type { GenerationOptions, Persona } from '@shared/types'
+import type { GenerationOptions, Persona, PersonaRelationship } from '@shared/types'
 import { actions, uid, useStore } from '../../store'
 import { estimateTokens } from '@shared/context'
 import { gradientFor, initialsOf } from '@shared/personas'
 import { Avatar } from './Avatar'
 import { Slider } from '../common/controls'
 import { XIcon, PlusIcon, TrashIcon } from '../../lib/icons'
+import { useDialogFocus } from '../../lib/useDialogFocus'
 
 /** Sampling defaults for a fresh persona — roleplay tends to want the creative profile. */
 const CREATIVE: GenerationOptions = {
@@ -28,8 +29,19 @@ function blankPersona(): Persona {
     avatar: { monogram: '?', gradient: gradientFor(id) },
     voiceTags: [],
     generation: undefined
+    ,schemaVersion: 2
+    ,version: 1
+    ,publicDescription: ''
+    ,privateMotivations: []
+    ,secrets: []
+    ,behavioralConstraints: []
+    ,speechGuidance: ''
+    ,relationships: []
   }
 }
+
+const lines = (value: string): string[] =>
+  value.split('\n').map((item) => item.trim()).filter(Boolean)
 
 interface Props {
   /** Persona to open in the form; omit/null to start a new one. */
@@ -45,11 +57,25 @@ interface Props {
  * switcher row hops between saved personas (or starts a new one).
  */
 export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Props) {
+  const dialogRef = useDialogFocus<HTMLDivElement>(onClose)
   const personas = useStore((s) => s.settings?.personas ?? [])
-  const initial = personas.find((p) => p.id === initialPersonaId) ?? null
+  const installedVoices = useStore((s) => s.installedVoices)
+  const conversation = useStore((s) =>
+    conversationId
+      ? s.conversations.find((item) => item.id === conversationId)
+      : undefined
+  )
+  const personaSnapshot = conversation?.personaSnapshot
+  const frozen = [
+    ...(personaSnapshot ? [personaSnapshot] : []),
+    ...(conversation?.castSnapshots ?? [])
+  ].find((snapshot) => snapshot.sourcePersonaId === initialPersonaId)?.persona
+  const initial = personas.find((p) => p.id === initialPersonaId) ?? frozen ?? null
   const [draft, setDraft] = useState<Persona>(initial ? structuredClone(initial) : blankPersona())
   const [samplingOn, setSamplingOn] = useState(Boolean(initial?.generation))
   const [tagDraft, setTagDraft] = useState('')
+  const [showDelete, setShowDelete] = useState(false)
+  const [replacementId, setReplacementId] = useState('')
 
   const set = (patch: Partial<Persona>): void => setDraft((d) => ({ ...d, ...patch }))
   const setName = (name: string): void =>
@@ -83,7 +109,10 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
       brief: draft.brief.trim(),
       greeting: draft.greeting?.trim() || undefined,
       avatar: { ...draft.avatar, monogram: initialsOf(draft.name) },
-      generation: samplingOn ? (draft.generation ?? CREATIVE) : undefined
+      generation: samplingOn ? (draft.generation ?? CREATIVE) : undefined,
+      relationships: draft.relationships
+        ?.filter((relationship) => relationship.personaId && relationship.summary.trim())
+        .map((relationship) => ({ ...relationship, summary: relationship.summary.trim() }))
     }
     actions.savePersona(persona)
     if (apply && conversationId) void actions.setConversationPersona(conversationId, persona.id)
@@ -91,20 +120,43 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
   }
 
   const briefTokens = estimateTokens(draft.brief)
+  const identityTokens = estimateTokens(
+    [
+      draft.publicDescription,
+      ...(draft.privateMotivations ?? []),
+      ...(draft.secrets ?? []),
+      ...(draft.behavioralConstraints ?? []),
+      draft.speechGuidance,
+      ...(draft.relationships ?? []).map((relationship) => relationship.summary)
+    ].filter(Boolean).join('\n')
+  )
+  const impact = isSaved ? actions.personaDeletionImpact(draft.id) : null
 
   return (
     <div className="no-drag fixed bottom-0 left-0 right-0 top-10 z-40 flex justify-end">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-fade-in" onClick={onClose} />
-      <div className="relative flex h-full w-full max-w-[480px] animate-fade-in flex-col border-l border-sibyl-border bg-sibyl-sunken shadow-2xl">
+      <div aria-hidden className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-fade-in" onClick={onClose} />
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="persona-editor-title"
+        tabIndex={-1}
+        className="relative flex h-full w-full max-w-[480px] animate-fade-in flex-col border-l border-sibyl-border bg-sibyl-sunken shadow-2xl"
+      >
         {/* header */}
         <div className="flex items-center justify-between gap-3 border-b border-sibyl-border/60 px-5 py-4">
           <div>
             <div className="eyebrow text-sibyl-accent">// Persona</div>
-            <h2 className="mt-1 font-mono text-[18px] font-bold text-sibyl-text">
+            <h2 id="persona-editor-title" className="mt-1 font-mono text-[18px] font-bold text-sibyl-text">
               {isSaved ? 'Edit persona' : 'New persona'}
             </h2>
           </div>
-          <button onClick={onClose} className="btn-ghost h-8 w-8 p-0">
+          <button
+            data-dialog-initial-focus
+            onClick={onClose}
+            className="btn-ghost h-8 w-8 p-0"
+            aria-label="Close persona editor"
+          >
             <XIcon size={16} />
           </button>
         </div>
@@ -154,6 +206,118 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
               />
             </div>
 
+            <div className="rounded-lg border border-sibyl-border/60 bg-sibyl-surface/40 p-3.5">
+              <div className="mb-3 flex items-center justify-between">
+                <span className="eyebrow text-[10.5px]">Identity & private context</span>
+                <span className="font-mono text-[10px] text-sibyl-faint">
+                  ~{identityTokens} / 3,000 tok
+                </span>
+              </div>
+              <label className="mb-1 block text-[11px] text-sibyl-muted">Public description</label>
+              <textarea
+                value={draft.publicDescription ?? ''}
+                onChange={(e) => set({ publicDescription: e.target.value })}
+                rows={2}
+                className="input mb-3 resize-none text-[12.5px]"
+                placeholder="What every character may know or observe."
+              />
+              {([
+                ['Private motivations · one per line', 'privateMotivations'],
+                ['Secrets · one per line', 'secrets'],
+                ['Behavioral constraints · one per line', 'behavioralConstraints']
+              ] as const).map(([label, field]) => (
+                <div key={field} className="mb-3">
+                  <label className="mb-1 block text-[11px] text-sibyl-muted">{label}</label>
+                  <textarea
+                    value={(draft[field] ?? []).join('\n')}
+                    onChange={(e) => set({ [field]: lines(e.target.value) })}
+                    rows={2}
+                    className="input resize-none text-[12.5px]"
+                  />
+                </div>
+              ))}
+              <label className="mb-1 block text-[11px] text-sibyl-muted">Speech & style guidance</label>
+              <textarea
+                value={draft.speechGuidance ?? ''}
+                onChange={(e) => set({ speechGuidance: e.target.value })}
+                rows={2}
+                className="input resize-none text-[12.5px]"
+              />
+            </div>
+
+            <div>
+              <div className="mb-2 flex items-center justify-between">
+                <span className="eyebrow text-[10.5px]">Relationships</span>
+                <button
+                  onClick={() =>
+                    set({
+                      relationships: [
+                        ...(draft.relationships ?? []),
+                        {
+                          personaId: personas.find((persona) => persona.id !== draft.id)?.id ?? '',
+                          summary: '',
+                          visibility: 'private'
+                        }
+                      ]
+                    })
+                  }
+                  className="btn-ghost px-2 py-1 text-[11px]"
+                >
+                  <PlusIcon size={11} /> Add
+                </button>
+              </div>
+              <div className="space-y-2">
+                {(draft.relationships ?? []).map((relationship, index) => {
+                  const update = (patch: Partial<PersonaRelationship>): void =>
+                    set({
+                      relationships: draft.relationships!.map((item, i) =>
+                        i === index ? { ...item, ...patch } : item
+                      )
+                    })
+                  return (
+                    <div key={`${relationship.personaId}-${index}`} className="rounded-lg border border-sibyl-border/60 p-2">
+                      <div className="mb-2 flex gap-2">
+                        <select
+                          value={relationship.personaId}
+                          onChange={(e) => update({ personaId: e.target.value })}
+                          className="input h-8 flex-1 py-0 text-[12px]"
+                        >
+                          <option value="">Choose persona…</option>
+                          {personas.filter((persona) => persona.id !== draft.id).map((persona) => (
+                            <option key={persona.id} value={persona.id}>{persona.name}</option>
+                          ))}
+                        </select>
+                        <select
+                          value={relationship.visibility}
+                          onChange={(e) => update({ visibility: e.target.value as 'public' | 'private' })}
+                          className="input h-8 w-24 py-0 text-[12px]"
+                        >
+                          <option value="private">Private</option>
+                          <option value="public">Public</option>
+                        </select>
+                        <button
+                          onClick={() =>
+                            set({
+                              relationships: draft.relationships!.filter((_, i) => i !== index)
+                            })
+                          }
+                          className="btn-ghost h-8 w-8 p-0"
+                        >
+                          <TrashIcon size={12} />
+                        </button>
+                      </div>
+                      <input
+                        value={relationship.summary}
+                        onChange={(e) => update({ summary: e.target.value })}
+                        className="input text-[12.5px]"
+                        placeholder="How this character sees the relationship"
+                      />
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+
             <div>
               <div className="mb-1.5 flex items-center justify-between">
                 <span className="eyebrow text-[10.5px]">Character brief · system prompt</span>
@@ -193,6 +357,47 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
                   onBlur={addTag}
                   placeholder="+ tag"
                   className="w-[72px] rounded-full border border-dashed border-sibyl-border bg-transparent px-2.5 py-1 font-mono text-[10.5px] text-sibyl-muted outline-none focus:border-sibyl-accent/40"
+                />
+              </div>
+              <div className="mt-2 flex gap-2">
+                <label htmlFor="persona-voice" className="sr-only">
+                  Character voice
+                </label>
+                <select
+                  id="persona-voice"
+                  value={draft.voice?.voiceId ?? ''}
+                  onChange={(e) => set({ voice: { ...draft.voice, voiceId: e.target.value || undefined } })}
+                  className="input flex-1 text-[12px]"
+                >
+                  <option value="">Use scene or global voice</option>
+                  {installedVoices.map((voice) => (
+                    <option
+                      key={voice.id}
+                      value={voice.id}
+                      disabled={Boolean(
+                        voice.availability && voice.availability !== 'available'
+                      )}
+                    >
+                      {voice.name}
+                      {voice.availability && voice.availability !== 'available'
+                        ? ` · ${voice.availability}`
+                        : ''}
+                    </option>
+                  ))}
+                </select>
+                <label htmlFor="persona-voice-rate" className="sr-only">
+                  Character speaking rate
+                </label>
+                <input
+                  id="persona-voice-rate"
+                  type="number"
+                  min={0.5}
+                  max={2}
+                  step={0.05}
+                  value={draft.voice?.rate ?? 1}
+                  onChange={(e) => set({ voice: { ...draft.voice, rate: Number(e.target.value) } })}
+                  className="input w-20 text-[12px]"
+                  title="Speech rate"
                 />
               </div>
             </div>
@@ -249,6 +454,39 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
                 />
               </div>
             </div>
+            {isSaved && showDelete && (
+              <div className="rounded-lg border border-red-500/30 bg-red-500/[0.06] p-3 text-[12px]">
+                <p className="mb-2 text-sibyl-secondary">
+                  Used by {impact?.conversations ?? 0} conversation(s), including {impact?.scenes ?? 0} scene(s).
+                  Frozen snapshots keep old work usable.
+                </p>
+                <select
+                  value={replacementId}
+                  onChange={(e) => setReplacementId(e.target.value)}
+                  className="input mb-2 h-8 py-0 text-[12px]"
+                >
+                  <option value="">Replacement persona…</option>
+                  {personas.filter((persona) => persona.id !== draft.id).map((persona) => (
+                    <option key={persona.id} value={persona.id}>{persona.name}</option>
+                  ))}
+                </select>
+                <div className="flex flex-wrap gap-2">
+                  <button onClick={() => { actions.deletePersona(draft.id, 'keep-snapshot'); onClose() }} className="btn-surface px-2 py-1">
+                    Keep snapshots
+                  </button>
+                  <button onClick={() => { actions.deletePersona(draft.id, 'detach'); onClose() }} className="btn-surface px-2 py-1">
+                    Detach
+                  </button>
+                  <button
+                    disabled={!replacementId}
+                    onClick={() => { actions.deletePersona(draft.id, 'replace', replacementId); onClose() }}
+                    className="btn-surface px-2 py-1 disabled:opacity-40"
+                  >
+                    Replace
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -256,13 +494,10 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
         <div className="flex items-center justify-between gap-2 border-t border-sibyl-border/60 px-5 py-3.5">
           {isSaved ? (
             <button
-              onClick={() => {
-                actions.deletePersona(draft.id)
-                onClose()
-              }}
+              onClick={() => setShowDelete((value) => !value)}
               className="btn-ghost px-2.5 py-1.5 text-[12.5px] hover:text-red-300"
             >
-              <TrashIcon size={13} /> Delete
+              <TrashIcon size={13} /> {showDelete ? 'Cancel delete' : 'Delete'}
             </button>
           ) : (
             <span />

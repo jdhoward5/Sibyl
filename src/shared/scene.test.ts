@@ -110,6 +110,19 @@ describe('buildBeatPrompt', () => {
     expect(r.system).toContain('- Bo — pilot')
   })
 
+  it('applies the shared scene instruction to every speaker prompt', () => {
+    for (const speaker of cast) {
+      const r = buildBeatPrompt({
+        messages: [],
+        speaker,
+        cast,
+        sceneInstruction: 'Keep the scene tense and avoid resolving the mystery.'
+      })
+      expect(r.system).toContain('Scene instruction (applies to every character and the whole scene):')
+      expect(r.system).toContain('Keep the scene tense and avoid resolving the mystery.')
+    }
+  })
+
   it("maps the speaker's own beats to unprefixed model turns and others to prefixed user turns", () => {
     const messages = [beat(A, 'Ready.'), beat(B, 'Hold on.')]
     const r = buildBeatPrompt({ messages, speaker: A, cast })

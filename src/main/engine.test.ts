@@ -52,7 +52,7 @@ vi.mock('node-llama-cpp', () => ({
   }
 }))
 
-import { InferenceEngine } from './engine'
+import { InferenceEngine, parseRoleplayMaintenance } from './engine'
 
 function model(id: string): InstalledModel {
   return {
@@ -103,7 +103,260 @@ const conversation: Conversation = {
   updatedAt: '2026-01-01T00:00:01.000Z'
 }
 
+describe('roleplay maintenance validation', () => {
+  it('accepts only supported public facts with real provenance', () => {
+    const result = parseRoleplayMaintenance(
+      JSON.stringify({
+        recap: 'Ada remains at the gate.',
+        facts: [
+          {
+            category: 'location',
+            text: 'Ada is at the gate.',
+            sourceMessageIds: ['message-a']
+          }
+        ]
+      }),
+      new Set(['message-a']),
+      '2026-01-01T00:00:00.000Z'
+    )
+    expect(result.recap).toBe('Ada remains at the gate.')
+    expect(result.facts[0]).toMatchObject({
+      category: 'location',
+      visibility: { kind: 'public' },
+      provenanceMessageIds: ['message-a'],
+      pinned: false
+    })
+  })
+
+  it('rejects invented provenance and unknown fields', () => {
+    expect(() =>
+      parseRoleplayMaintenance(
+        JSON.stringify({
+          recap: 'Bad.',
+          facts: [
+            {
+              category: 'plot',
+              text: 'Invented.',
+              sourceMessageIds: ['missing'],
+              secret: true
+            }
+          ]
+        }),
+        new Set(['message-a']),
+        '2026-01-01T00:00:00.000Z'
+      )
+    ).toThrow(/invalid fact/)
+  })
+})
+
 describe('InferenceEngine lifecycle', () => {
+  it('runs a validated local director decision before releasing the engine', async () => {
+    fakes.installed.set('model-a', model('model-a'))
+    fakes.llama.loadModel.mockResolvedValueOnce(nativeModel().value)
+    fakes.settings.personas = [
+      {
+        id: 'director-a',
+        name: 'Ada',
+        role: 'Scout',
+        brief: 'Ada',
+        avatar: { monogram: 'A', gradient: ['#000', '#111'] },
+        voiceTags: []
+      },
+      {
+        id: 'director-b',
+        name: 'Bo',
+        role: 'Guide',
+        brief: 'Bo',
+        avatar: { monogram: 'B', gradient: ['#222', '#333'] },
+        voiceTags: []
+      }
+    ]
+    const scene: Conversation = {
+      ...conversation,
+      id: 'director-scene',
+      cast: ['director-a', 'director-b'],
+      director: {
+        enabled: true,
+        useModel: true,
+        pacing: 'balanced',
+        initiative: 'balanced',
+        interruption: 'natural-pauses',
+        inspectIntent: false
+      },
+      messages: []
+    }
+    const engine = new InferenceEngine()
+    await engine.load('model-a')
+    const session = fakes.sessions.at(-1)!
+    session.prompt.mockResolvedValueOnce(
+      '{"action":"continue","speakerId":"director-b","intent":"Bo should answer."}'
+    )
+
+    await expect(engine.directScene(scene)).resolves.toMatchObject({
+      action: 'continue',
+      speakerId: 'director-b',
+      usedModel: true
+    })
+    expect((await engine.status()).operation).toBeUndefined()
+  })
+
+  it('accounts for an attempted director pass when output is invalid', async () => {
+    fakes.installed.set('model-a', model('model-a'))
+    fakes.llama.loadModel.mockResolvedValueOnce(nativeModel().value)
+    fakes.settings.personas = [
+      {
+        id: 'director-a',
+        name: 'Ada',
+        role: 'Scout',
+        brief: 'Ada',
+        avatar: { monogram: 'A', gradient: ['#000', '#111'] },
+        voiceTags: []
+      },
+      {
+        id: 'director-b',
+        name: 'Bo',
+        role: 'Guide',
+        brief: 'Bo',
+        avatar: { monogram: 'B', gradient: ['#222', '#333'] },
+        voiceTags: []
+      }
+    ]
+    const scene: Conversation = {
+      ...conversation,
+      id: 'director-scene',
+      cast: ['director-a', 'director-b'],
+      director: {
+        enabled: true,
+        useModel: true,
+        pacing: 'balanced',
+        initiative: 'balanced',
+        interruption: 'natural-pauses',
+        inspectIntent: false
+      },
+      messages: []
+    }
+    const engine = new InferenceEngine()
+    await engine.load('model-a')
+    fakes.sessions.at(-1)!.prompt.mockResolvedValueOnce('not json')
+
+    await expect(engine.directScene(scene)).resolves.toMatchObject({
+      action: 'continue',
+      speakerId: 'director-a',
+      usedModel: true,
+      fallbackReason: 'invalid-output'
+    })
+  })
+
+  it('aborts only the active director pass for the matching conversation', async () => {
+    fakes.installed.set('model-a', model('model-a'))
+    fakes.llama.loadModel.mockResolvedValueOnce(nativeModel().value)
+    fakes.settings.personas = [
+      {
+        id: 'director-a',
+        name: 'Ada',
+        role: 'Scout',
+        brief: 'Ada',
+        avatar: { monogram: 'A', gradient: ['#000', '#111'] },
+        voiceTags: []
+      },
+      {
+        id: 'director-b',
+        name: 'Bo',
+        role: 'Guide',
+        brief: 'Bo',
+        avatar: { monogram: 'B', gradient: ['#222', '#333'] },
+        voiceTags: []
+      }
+    ]
+    const scene: Conversation = {
+      ...conversation,
+      id: 'director-scene',
+      cast: ['director-a', 'director-b'],
+      director: {
+        enabled: true,
+        useModel: true,
+        pacing: 'balanced',
+        initiative: 'balanced',
+        interruption: 'natural-pauses',
+        inspectIntent: false
+      },
+      messages: []
+    }
+    const engine = new InferenceEngine()
+    await engine.load('model-a')
+    fakes.sessions.at(-1)!.prompt.mockImplementationOnce(
+      (_prompt: string, options?: { signal?: AbortSignal }) =>
+        new Promise<string>((resolve) => {
+          options?.signal?.addEventListener('abort', () => resolve(''), { once: true })
+        })
+    )
+
+    const decision = engine.directScene(scene)
+    await vi.waitFor(() => {
+      expect(engine.abortSceneDirector('other-scene')).toBe(false)
+      expect(engine.abortSceneDirector(scene.id)).toBe(true)
+    })
+    await expect(decision).resolves.toMatchObject({
+      usedModel: true,
+      fallbackReason: 'timeout'
+    })
+  })
+
+  it('bounds the private director prompt before local inference', async () => {
+    fakes.installed.set('model-a', model('model-a'))
+    const native = nativeModel()
+    fakes.llama.loadModel.mockResolvedValueOnce(native.value)
+    fakes.settings.personas = [
+      {
+        id: 'director-a',
+        name: 'Ada',
+        role: 'Scout',
+        brief: 'Ada',
+        avatar: { monogram: 'A', gradient: ['#000', '#111'] },
+        voiceTags: []
+      },
+      {
+        id: 'director-b',
+        name: 'Bo',
+        role: 'Guide',
+        brief: 'Bo',
+        avatar: { monogram: 'B', gradient: ['#222', '#333'] },
+        voiceTags: []
+      }
+    ]
+    const scene: Conversation = {
+      ...conversation,
+      id: 'director-scene',
+      cast: ['director-a', 'director-b'],
+      director: {
+        enabled: true,
+        useModel: true,
+        sceneGoal: 'Keep the test bounded.',
+        pacing: 'balanced',
+        initiative: 'balanced',
+        interruption: 'natural-pauses',
+        inspectIntent: false
+      },
+      messages: [{
+        id: 'large-message',
+        role: 'assistant',
+        speakerId: 'director-a',
+        speakerName: 'Ada',
+        content: `old-${'x'.repeat(20_000)}-newest`,
+        createdAt: ''
+      }]
+    }
+    const engine = new InferenceEngine()
+    await engine.load('model-a')
+    fakes.sessions.at(-1)!.prompt.mockResolvedValueOnce(
+      '{"action":"continue","speakerId":"director-b","intent":"Continue."}'
+    )
+
+    const result = await engine.directScene(scene)
+    expect(result.promptTokens).toBeLessThanOrEqual(896)
+    expect(fakes.sessions.at(-1)!.prompt.mock.calls[0][0]).toContain('newest')
+  })
+
   beforeEach(() => {
     fakes.installed.clear()
     fakes.installed.set('model-a', model('model-a'))
@@ -111,7 +364,10 @@ describe('InferenceEngine lifecycle', () => {
     fakes.sessions.length = 0
     fakes.llama.loadModel.mockReset()
     fakes.settings.load.contextSize = 2048
+    fakes.settings.load.systemPrompt = 'test'
     fakes.settings.generation.maxTokens = 256
+    fakes.settings.context.keepRecentMessages = 12
+    fakes.settings.context.keepRecentFraction = 0.35
     fakes.settings.personas = []
   })
 
@@ -231,6 +487,72 @@ describe('InferenceEngine lifecycle', () => {
     expect(first.value.dispose).toHaveBeenCalledOnce()
   })
 
+  it('rebuilds a warm session when effective prompt inputs change', async () => {
+    const first = nativeModel()
+    fakes.llama.loadModel.mockResolvedValueOnce(first.value)
+    const engine = new InferenceEngine()
+    await engine.load('model-a')
+    const session = fakes.sessions.at(-1)!
+
+    await engine.generate(conversation, 'hello', 'assistant-1', undefined)
+    expect(session.setChatHistory).toHaveBeenCalledTimes(1)
+
+    const next: Conversation = {
+      ...conversation,
+      messages: [
+        ...conversation.messages.slice(0, -1),
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: 'first answer',
+          createdAt: '2026-01-01T00:00:01.000Z'
+        },
+        {
+          id: 'user-2',
+          role: 'user',
+          content: 'again',
+          createdAt: '2026-01-01T00:00:02.000Z'
+        },
+        {
+          id: 'assistant-2',
+          role: 'assistant',
+          content: '',
+          createdAt: '2026-01-01T00:00:03.000Z'
+        }
+      ]
+    }
+    fakes.settings.load.systemPrompt = 'edited prompt'
+    await engine.generate(next, 'again', 'assistant-2', undefined)
+    expect(session.setChatHistory).toHaveBeenCalledTimes(2)
+
+    const third: Conversation = {
+      ...next,
+      messages: [
+        ...next.messages.slice(0, -1),
+        {
+          id: 'assistant-2',
+          role: 'assistant',
+          content: 'second answer',
+          createdAt: '2026-01-01T00:00:03.000Z'
+        },
+        {
+          id: 'user-3',
+          role: 'user',
+          content: 'once more',
+          createdAt: '2026-01-01T00:00:04.000Z'
+        },
+        {
+          id: 'assistant-3',
+          role: 'assistant',
+          content: '',
+          createdAt: '2026-01-01T00:00:05.000Z'
+        }
+      ]
+    }
+    await engine.generate(third, 'once more', 'assistant-3', undefined)
+    expect(session.setChatHistory).toHaveBeenCalledTimes(2)
+  })
+
   it('includes prospective user input in context accounting', async () => {
     const first = nativeModel()
     fakes.llama.loadModel.mockResolvedValueOnce(first.value)
@@ -295,5 +617,131 @@ describe('InferenceEngine lifecycle', () => {
         nextSpeakerId: 'not-in-cast'
       })
     ).rejects.toThrow(/not in this scene/)
+  })
+
+  it('applies scene-wide instruction and generation overrides to the next beat', async () => {
+    const first = nativeModel()
+    fakes.llama.loadModel.mockResolvedValueOnce(first.value)
+    fakes.settings.personas = [
+      {
+        id: 'persona-1',
+        name: 'One',
+        role: 'Scout',
+        brief: 'Watch the road.',
+        avatar: { monogram: 'O', gradient: ['#000000', '#111111'] },
+        voiceTags: []
+      },
+      {
+        id: 'persona-2',
+        name: 'Two',
+        role: 'Scholar',
+        brief: 'Study every clue.',
+        avatar: { monogram: 'T', gradient: ['#222222', '#333333'] },
+        voiceTags: []
+      }
+    ]
+    const scene: Conversation = {
+      ...conversation,
+      id: 'scene-instruction',
+      cast: ['persona-1', 'persona-2'],
+      messages: [],
+      overrides: {
+        systemPrompt: 'Keep the entire scene tense.',
+        generation: {
+          ...fakes.settings.generation,
+          temperature: 0.17,
+          maxTokens: 77
+        }
+      }
+    }
+    const engine = new InferenceEngine()
+    await engine.load('model-a')
+    const session = fakes.sessions.at(-1)!
+
+    await engine.generateBeat(scene, 'persona-1', 'beat-1', undefined)
+
+    const history = session.setChatHistory.mock.calls.at(-1)?.[0] as Array<{
+      type: string
+      text?: string
+    }>
+    expect(history[0].text).toContain('Keep the entire scene tense.')
+    expect(session.prompt).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ temperature: 0.17, maxTokens: 77 })
+    )
+  })
+
+  it('keeps private thoughts and director guidance out of the public scene recap', async () => {
+    const first = nativeModel()
+    fakes.llama.loadModel.mockResolvedValueOnce(first.value)
+    fakes.settings.context.keepRecentMessages = 1
+    const scene: Conversation = {
+      ...conversation,
+      id: 'scene-private-compaction',
+      cast: ['persona-1', 'persona-2'],
+      messages: [
+        {
+          id: 'director-note',
+          role: 'user',
+          content: 'Secretly make Ada betray Bo.',
+          createdAt: '',
+          director: true
+        },
+        {
+          id: 'private-thought',
+          role: 'assistant',
+          content: 'Ada hides the map.',
+          createdAt: '',
+          speakerId: 'persona-1',
+          speakerName: 'Ada',
+          segments: [
+            {
+              id: 'thought-segment',
+              kind: 'thought',
+              content: 'Ada hides the map.',
+              visibility: { kind: 'private', characterIds: ['persona-1'] }
+            }
+          ]
+        },
+        {
+          id: 'public-beat',
+          role: 'assistant',
+          content: 'The bridge alarm sounds.',
+          createdAt: '',
+          speakerId: 'persona-2',
+          speakerName: 'Bo'
+        },
+        {
+          id: 'recent-beat',
+          role: 'assistant',
+          content: 'Ada reaches the console.',
+          createdAt: '',
+          speakerId: 'persona-1',
+          speakerName: 'Ada'
+        }
+      ]
+    }
+    const engine = new InferenceEngine()
+    await engine.load('model-a')
+    const session = fakes.sessions.at(-1)!
+    session.prompt.mockResolvedValueOnce(
+      JSON.stringify({
+        recap: 'The bridge alarm sounds.',
+        facts: [
+          {
+            category: 'condition',
+            text: 'The bridge alarm is sounding.',
+            sourceMessageIds: ['public-beat']
+          }
+        ]
+      })
+    )
+
+    await engine.compact(scene)
+
+    const instruction = session.prompt.mock.calls.at(-1)?.[0] as string
+    expect(instruction).toContain('The bridge alarm sounds.')
+    expect(instruction).not.toContain('Secretly make Ada betray Bo.')
+    expect(instruction).not.toContain('Ada hides the map.')
   })
 })

@@ -2,6 +2,7 @@ import { actions, useStore } from '../../store'
 import { descriptorTags, formatBytes, isNsfwModel, parseParamLabel, quantRank } from '@shared/format'
 import { XIcon, DownloadIcon, CheckIcon, HeartIcon, ExternalLinkIcon } from '../../lib/icons'
 import type { HFGGUFFile } from '@shared/types'
+import { useDialogFocus } from '../../lib/useDialogFocus'
 
 function recommendationFor(quant: string | undefined): string | null {
   if (!quant) return null
@@ -13,8 +14,10 @@ function recommendationFor(quant: string | undefined): string | null {
 }
 
 export function ModelDetailDrawer() {
+  const close = (): void => actions.closeModelDetail()
   const detail = useStore((s) => s.discover.selected)
   const loading = useStore((s) => s.discover.detailLoading)
+  const dialogRef = useDialogFocus<HTMLDivElement>(close, loading || Boolean(detail))
   const downloads = useStore((s) => s.downloads)
   const installed = useStore((s) => s.installedModels)
 
@@ -26,8 +29,16 @@ export function ModelDetailDrawer() {
 
   return (
     <div className="no-drag fixed bottom-0 left-0 right-0 top-10 z-40 flex justify-end">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-fade-in" onClick={() => actions.closeModelDetail()} />
-      <div className="relative flex h-full w-full max-w-xl animate-fade-in flex-col border-l border-sibyl-border bg-sibyl-surface shadow-2xl">
+      <div aria-hidden className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-fade-in" onClick={close} />
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={detail ? 'model-detail-title' : undefined}
+        aria-label={detail ? undefined : 'Loading model details'}
+        tabIndex={-1}
+        className="relative flex h-full w-full max-w-xl animate-fade-in flex-col border-l border-sibyl-border bg-sibyl-surface shadow-2xl"
+      >
         {loading ? (
           <div className="flex flex-1 items-center justify-center">
             <span className="h-3 w-3 animate-pulse-glow rounded-full bg-sibyl-accent" />
@@ -36,7 +47,7 @@ export function ModelDetailDrawer() {
           <>
             <div className="flex items-start justify-between gap-3 border-b border-sibyl-border/60 p-5">
               <div className="min-w-0">
-                <h2 className="truncate text-lg font-semibold text-sibyl-text" title={detail.id}>
+                <h2 id="model-detail-title" className="truncate text-lg font-semibold text-sibyl-text" title={detail.id}>
                   {detail.id.split('/').pop()}
                 </h2>
                 <p className="truncate text-[13px] text-sibyl-muted">{detail.id.split('/')[0]}</p>
@@ -75,7 +86,12 @@ export function ModelDetailDrawer() {
                   ))}
                 </div>
               </div>
-              <button onClick={() => actions.closeModelDetail()} className="btn-ghost h-8 w-8 p-0">
+              <button
+                data-dialog-initial-focus
+                onClick={close}
+                className="btn-ghost h-8 w-8 p-0"
+                aria-label="Close model details"
+              >
                 <XIcon size={16} />
               </button>
             </div>

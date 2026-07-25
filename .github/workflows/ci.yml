@@ -32,6 +32,17 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      # Shipping dependencies are a hard zero-vulnerability gate. The complete
+      # dev/build dependency report is retained for review but is informational:
+      # upstream esbuild currently has no fixed release in the advisory range.
+      - run: npm audit --omit=dev
+      - run: node scripts/full-audit-report.mjs audit-full-${{ runner.os }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: full-npm-audit-${{ runner.os }}
+          path: audit-full-${{ runner.os }}.json
+          if-no-files-found: error
       - run: npm run build

@@ -32,6 +32,46 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+:focus-visible {
+  outline: 2px solid rgb(var(--sibyl-accent));
+  outline-offset: 3px;
+}
+
+html.high-contrast .text-sibyl-muted,
+html.high-contrast .text-sibyl-faint {
+  color: #d2d6e5;
+}
+
+html.high-contrast .border-sibyl-border,
+html.high-contrast .border-sibyl-border\/60 {
+  border-color: #7c849e;
+}
+
+html.high-contrast :focus-visible {
+  outline-width: 3px;
+  outline-color: #ffffff;
+}
+
+html.reduce-motion *,
+html.reduce-motion *::before,
+html.reduce-motion *::after {
+  scroll-behavior: auto !important;
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
 /* Allow text selection in content areas. */
 .selectable,
 .selectable * {

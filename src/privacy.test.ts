@@ -25,7 +25,17 @@ const SRC = path.dirname(fileURLToPath(import.meta.url))
 const CONSOLE = /\bconsole\.(log|info|debug|warn|error|trace|dir)\s*\(/
 
 /** Field accesses that carry private prompt/message text. */
-const CONTENT_SYMBOLS = ['.content', 'systemPrompt', 'userText', 'currentUserText', '.brief', '.greeting', 'userCharacter']
+const CONTENT_SYMBOLS = [
+  '.content',
+  'systemPrompt',
+  'userText',
+  'currentUserText',
+  '.brief',
+  '.greeting',
+  'userCharacter',
+  'recoveryPassphrase',
+  'passphrase'
+]
 
 function sourceFiles(dir: string): string[] {
   const out: string[] = []

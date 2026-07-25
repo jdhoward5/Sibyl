@@ -8,6 +8,9 @@ npmRebuild: false
 files:
   - out/**/*
   - package.json
+  # Offline Ed25519 public key used to authenticate release manifests and the
+  # Windows Squirrel feed. The private key never enters the repository/package.
+  - build/release-manifest-public.pem
   # Never sweep non-app root content into the asar. The `out/**/*` include above
   # does NOT act as an allowlist here — electron-builder packs the whole project
   # root and only the `!` patterns below trim it, and (as the existing node_modules
@@ -15,11 +18,38 @@ files:
   # root-relative `release/**`. electron-builder auto-excludes only the *current*
   # output dir (`release/${version}`), so a prior `release/<old version>` build
   # (a whole previous app, ~650 MB) and the `.smoke-models` GGUF cache (~400 MB)
-  # otherwise leak in — ~1 GB of dead weight. (`!**/src/**` / `!**/*.gguf` are
-  # deliberately NOT used: `**/src` would also strip dependencies' own src/ dirs,
-  # and a model only ever lives under `.smoke-models`, already covered.)
+  # otherwise leak in — ~1 GB of dead weight. (`!**/*.gguf` is deliberately not
+  # used: a model only ever lives under `.smoke-models`, already covered.)
   - "!**/release/**"
   - "!**/.smoke-models/**"
+  # Application runtime allowlist enforcement. electron-builder injects its own
+  # broad project-root include, so explicitly remove every development root.
+  # The generated staging root has no application `src/`. Never exclude
+  # `node_modules/**/src` globally: several production packages execute their
+  # published JavaScript from such a directory.
+  - "!**/docs/**"
+  - "!**/scripts/**"
+  - "!**/patches/**"
+  - "!**/.agents/**"
+  - "!**/.github/**"
+  - "!**/*.{test,spec}.{js,cjs,mjs,ts,tsx}"
+  - "!**/tsconfig*.json"
+  - "!**/*.tsbuildinfo"
+  - "!**/AGENTS.md"
+  - "!**/CLAUDE.md"
+  # Production dependencies often publish development-only sources, tests,
+  # documentation, declarations, and source maps alongside their runtime entry
+  # points. Keep JavaScript runtime sources (some small packages, notably
+  # `debug`, intentionally execute from `src/`) while removing non-executable
+  # build and test material.
+  - "!**/node_modules/**/*.map"
+  - "!**/node_modules/**/*.d.ts"
+  - "!**/node_modules/**/*.d.ts.map"
+  - "!**/node_modules/**/*.ts"
+  - "!**/node_modules/**/*.tsx"
+  - "!**/node_modules/**/*.md"
+  - "!**/node_modules/**/.github/**"
+  - "!**/node_modules/**/{test,tests,__tests__,docs,doc,examples,example,scripts,patches}/**"
   # Trim dead weight from the packaged native deps. We ship a custom from-source
   # llama.cpp build (b9616) under llama/localBuilds — CUDA on Windows, Metal on
   # macOS — which adds newer-architecture support (e.g. gemma4) the prebuilt b8390

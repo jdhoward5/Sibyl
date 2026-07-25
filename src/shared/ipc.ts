@@ -3,7 +3,7 @@
 // contract can never drift between the two sides.
 
 import type {
-  CompactionInfo,
+  CompactionResult,
   Conversation,
   ContextUsage,
   ContextUsageProjection,
@@ -14,13 +14,17 @@ import type {
   HFModelDetail,
   HFModelSummary,
   InstalledModel,
+  PrivateVaultBackup,
+  PrivateVaultStatus,
   RendererSettings,
   RendererSettingsPatch,
   Result,
+  SceneDirectorDecision,
   StorageIssue,
   UpdateStatus
 } from './types'
 import type { ExportFormat } from './export'
+import type { PortableBundlePreview } from './portable'
 import type { InstalledVoice, TtsEvent, TtsStatus, TtsVoiceDownload } from './tts'
 
 export const IPC = {
@@ -52,6 +56,8 @@ export const IPC = {
   // Chat
   chatSend: 'chat:send',
   chatAdvance: 'chat:advance', // generate one beat of a self-roleplay scene
+  chatDirect: 'chat:direct', // private ephemeral local-director decision
+  chatDirectAbort: 'chat:directAbort',
   chatAbort: 'chat:abort',
   chatEvent: 'chat:event', // main → renderer streaming event
   chatCompact: 'chat:compact', // summarize older turns to reclaim context
@@ -74,6 +80,27 @@ export const IPC = {
   settingsSet: 'settings:set',
   settingsSetHfToken: 'settings:setHfToken',
   settingsClearHfToken: 'settings:clearHfToken',
+
+  // Encrypted private-data vault
+  vaultStatus: 'vault:status',
+  vaultSetup: 'vault:setup',
+  vaultUnlock: 'vault:unlock',
+  vaultUnlockPasskey: 'vault:unlockPasskey',
+  vaultLock: 'vault:lock',
+  vaultSetSeamless: 'vault:setSeamless',
+  vaultSetPasskey: 'vault:setPasskey',
+  vaultChangeRecoveryPassphrase: 'vault:changeRecoveryPassphrase',
+  vaultListBackups: 'vault:listBackups',
+  vaultCreateBackup: 'vault:createBackup',
+  vaultVerifyRecovery: 'vault:verifyRecovery',
+  vaultRestoreBackup: 'vault:restoreBackup',
+
+  // Encrypted portable data
+  portableExportConversation: 'portable:exportConversation',
+  portableExportLibrary: 'portable:exportLibrary',
+  portableInspectImport: 'portable:inspectImport',
+  portableCommitImport: 'portable:commitImport',
+  portableDiscardImport: 'portable:discardImport',
 
   // Text-to-speech (on-device Piper voices)
   ttsStatus: 'tts:status',
@@ -133,12 +160,19 @@ export interface TtsSpeakRequest {
   rate?: number
 }
 
+export interface VaultSetupRequest {
+  recoveryPassphrase: string
+  seamlessOnThisDevice: boolean
+}
+
 export interface AppInfo {
   version: string
   electron: string
   node: string
   platform: string
   modelsDir: string
+  systemMemoryTotalBytes: number
+  systemMemoryFreeBytes: number
   /** Whether the OS keychain is available to securely store secrets (HF token). */
   secureStorageAvailable: boolean
 }
@@ -181,9 +215,11 @@ export interface SibylBridge {
     send(req: ChatSendRequest): Promise<Result<void>>
     /** Generate the next beat of a self-roleplay scene (one cast persona speaks). */
     advance(req: ChatAdvanceRequest): Promise<Result<void>>
+    direct(conversationId: string): Promise<Result<SceneDirectorDecision>>
+    abortDirector(conversationId: string): Promise<Result<{ aborted: boolean }>>
     abort(req: ChatAbortRequest): Promise<Result<{ aborted: boolean }>>
     /** Summarize older turns of a conversation into a compaction record. */
-    compact(conversationId: string): Promise<Result<CompactionInfo>>
+    compact(conversationId: string): Promise<Result<CompactionResult>>
     /**
      * Drop the engine's warm session for this conversation so the next send
      * rebuilds history from persisted state. Call after editing/deleting/
@@ -213,6 +249,32 @@ export interface SibylBridge {
     /** Store or replace the token without ever echoing it back to the renderer. */
     setHfToken(token: string): Promise<Result<void>>
     clearHfToken(): Promise<Result<void>>
+  }
+  vault: {
+    status(): Promise<Result<PrivateVaultStatus>>
+    setup(request: VaultSetupRequest): Promise<Result<PrivateVaultStatus>>
+    unlock(recoveryPassphrase: string): Promise<Result<PrivateVaultStatus>>
+    unlockPasskey(): Promise<Result<PrivateVaultStatus>>
+    lock(): Promise<Result<PrivateVaultStatus>>
+    setSeamless(enabled: boolean): Promise<Result<PrivateVaultStatus>>
+    setPasskey(enabled: boolean): Promise<Result<PrivateVaultStatus>>
+    changeRecoveryPassphrase(recoveryPassphrase: string): Promise<Result<PrivateVaultStatus>>
+    listBackups(): Promise<Result<PrivateVaultBackup[]>>
+    createBackup(): Promise<Result<void>>
+    verifyRecovery(): Promise<Result<{ currentRecords: number; validBackups: number }>>
+    restoreBackup(id: string): Promise<Result<void>>
+  }
+  portable: {
+    exportConversation(
+      id: string,
+      recoveryPassphrase: string
+    ): Promise<Result<{ saved: boolean; path?: string }>>
+    exportLibrary(
+      recoveryPassphrase: string
+    ): Promise<Result<{ saved: boolean; path?: string }>>
+    inspectImport(recoveryPassphrase: string): Promise<Result<PortableBundlePreview | null>>
+    commitImport(token: string): Promise<Result<{ conversationIds: string[] }>>
+    discardImport(token: string): Promise<Result<void>>
   }
   app: {
     info(): Promise<Result<AppInfo>>

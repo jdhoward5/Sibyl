@@ -8,6 +8,10 @@ import { Section, Slider, Toggle } from '../common/controls'
 import { Avatar } from '../persona/Avatar'
 import { PersonaEditor } from '../persona/PersonaEditor'
 import {
+  PortableExportDialog,
+  PortableImportDialog
+} from '../PortableDataDialogs'
+import {
   PlusIcon,
   TrashIcon,
   CheckIcon,
@@ -38,9 +42,9 @@ function PersonasSection({ settings }: { settings: RendererSettings }) {
             <EditIcon size={13} />
           </button>
           <button
-            onClick={() => actions.deletePersona(p.id)}
+            onClick={() => setEditor({ id: p.id })}
             className="btn-ghost shrink-0 px-2 py-1 text-[12px] hover:text-red-300"
-            title="Delete"
+            title="Review deletion impact"
           >
             <TrashIcon size={13} />
           </button>
@@ -407,11 +411,20 @@ function UpdatesSection() {
 
 export function SettingsView() {
   const settings = useStore((s) => s.settings)
+  const vault = useStore((s) => s.vault)
+  const vaultBackups = useStore((s) => s.vaultBackups)
   const appInfo = useStore((s) => s.appInfo)
   const engine = useStore((s) => s.engine)
   const storageIssues = useStore((s) => s.storageIssues)
   const [token, setToken] = useState('')
   const [tokenDirty, setTokenDirty] = useState(false)
+  const [newRecoveryPassphrase, setNewRecoveryPassphrase] = useState('')
+  const [recoveryConfirmation, setRecoveryConfirmation] = useState('')
+  const [changingRecovery, setChangingRecovery] = useState(false)
+  const [recoveryError, setRecoveryError] = useState<string | null>(null)
+  const [passkeyWorking, setPasskeyWorking] = useState(false)
+  const [portableExportOpen, setPortableExportOpen] = useState(false)
+  const [portableImportOpen, setPortableImportOpen] = useState(false)
 
   if (!settings) return null
 
@@ -486,11 +499,12 @@ export function SettingsView() {
               format={(v) => (v < 0 ? 'Auto (max)' : String(v))}
             />
             <div>
-              <label className="mb-1.5 block text-[13px] text-sibyl-text">Character brief</label>
+              <label htmlFor="global-character-brief" className="mb-1.5 block text-[13px] text-sibyl-text">Character brief</label>
               <p className="mb-1.5 text-[12px] text-sibyl-muted">
                 The default system prompt for blank threads. Personas override this per thread.
               </p>
               <textarea
+                id="global-character-brief"
                 value={load.systemPrompt}
                 onChange={(e) =>
                   actions.queueTextSettings({ load: { ...load, systemPrompt: e.target.value } })
@@ -578,6 +592,48 @@ export function SettingsView() {
           <GenerationProfilesSection settings={settings} />
           <VoiceSpeechSection settings={settings} />
 
+          <Section
+            title="Accessibility"
+            desc="Reading, contrast, and motion preferences for the whole app."
+          >
+            <Toggle
+              label="Reduce motion"
+              desc="Disables decorative transitions, pulsing indicators, and smooth animation."
+              checked={settings.accessibility.reducedMotion}
+              onChange={(reducedMotion) =>
+                actions.updateAccessibilitySettings({ reducedMotion })
+              }
+            />
+            <Toggle
+              label="High contrast"
+              desc="Strengthens borders, focus rings, muted text, and interactive states."
+              checked={settings.accessibility.highContrast}
+              onChange={(highContrast) =>
+                actions.updateAccessibilitySettings({ highContrast })
+              }
+            />
+            <div>
+              <label htmlFor="text-scale" className="mb-1.5 block text-[13px] text-sibyl-text">
+                Text size
+              </label>
+              <select
+                id="text-scale"
+                value={settings.accessibility.textScale}
+                onChange={(event) =>
+                  actions.updateAccessibilitySettings({
+                    textScale: Number(event.target.value) as
+                      RendererSettings['accessibility']['textScale']
+                  })
+                }
+                className="input h-9 py-0 text-[13px]"
+              >
+                <option value={1}>Default</option>
+                <option value={1.125}>Large · 112.5%</option>
+                <option value={1.25}>Larger · 125%</option>
+              </select>
+            </div>
+          </Section>
+
           <Section title="Downloads" desc="Integrity checks applied to models you download.">
             <Toggle
               label="Verify downloads with SHA-256"
@@ -646,6 +702,236 @@ export function SettingsView() {
                   Clear
                 </button>
               )}
+            </div>
+          </Section>
+
+          {vault?.state === 'unlocked' && (
+            <Section
+              title="Private data protection"
+              desc="Conversations, personas, prompts, and their metadata are encrypted at rest."
+            >
+                <Toggle
+                  label="Unlock seamlessly on this device"
+                desc={
+                  vault.deviceStorageAvailable
+                    ? 'Uses the operating-system keychain. Turn this off to require your recovery passphrase whenever Sibyl opens.'
+                    : 'Secure device storage is unavailable, so your recovery passphrase is required whenever Sibyl opens.'
+                }
+                checked={vault.hasDeviceSlot}
+                disabled={!vault.deviceStorageAvailable}
+                  onChange={(enabled) => void actions.setVaultSeamless(enabled)}
+                />
+                {vault.passkeyAvailable && (
+                  <Toggle
+                    label="Unlock with a passkey"
+                    desc="Uses Windows Hello, Touch ID, or another PRF-capable authenticator. Your recovery passphrase remains available if the passkey is lost."
+                    checked={vault.hasPasskeySlot}
+                    disabled={passkeyWorking}
+                    onChange={(enabled) => {
+                      setPasskeyWorking(true)
+                      void actions
+                        .setVaultPasskey(enabled)
+                        .finally(() => setPasskeyWorking(false))
+                    }}
+                  />
+                )}
+              <div className="flex items-center justify-between gap-4">
+                <p className="text-[12px] leading-relaxed text-sibyl-muted">
+                  Locking stops active speech and model work, clears private in-memory state, and
+                  returns to the unlock screen.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void actions.lockVault()}
+                  className="btn-surface shrink-0"
+                >
+                  Lock now
+                </button>
+              </div>
+              <p className="text-[11.5px] leading-relaxed text-sibyl-muted/80">
+                Your recovery passphrase is still required after copying the vault to different
+                hardware or losing access to this device’s keychain.
+              </p>
+              <div className="border-t border-sibyl-border/60 pt-4">
+                <p className="mb-2 text-[13px] font-medium text-sibyl-text">
+                  Change recovery passphrase
+                </p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <input
+                    type="password"
+                    value={newRecoveryPassphrase}
+                    autoComplete="new-password"
+                    placeholder="New passphrase"
+                    aria-label="New recovery passphrase"
+                    onChange={(event) => setNewRecoveryPassphrase(event.target.value)}
+                    className="input"
+                  />
+                  <input
+                    type="password"
+                    value={recoveryConfirmation}
+                    autoComplete="new-password"
+                    placeholder="Confirm passphrase"
+                    aria-label="Confirm new recovery passphrase"
+                    onChange={(event) => setRecoveryConfirmation(event.target.value)}
+                    className="input"
+                  />
+                </div>
+                {recoveryError && (
+                  <p role="alert" className="mt-2 text-[12px] text-red-300">
+                    {recoveryError}
+                  </p>
+                )}
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <p className="text-[11.5px] leading-relaxed text-sibyl-muted">
+                    Use at least 12 characters; several unique words are recommended.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={changingRecovery}
+                    onClick={() => {
+                      setRecoveryError(null)
+                      if (newRecoveryPassphrase.length < 12) {
+                        setRecoveryError('Use at least 12 characters.')
+                        return
+                      }
+                      if (newRecoveryPassphrase !== recoveryConfirmation) {
+                        setRecoveryError('The passphrases do not match.')
+                        return
+                      }
+                      setChangingRecovery(true)
+                      void actions
+                        .changeVaultRecoveryPassphrase(newRecoveryPassphrase)
+                        .then((changed) => {
+                          if (changed) {
+                            setNewRecoveryPassphrase('')
+                            setRecoveryConfirmation('')
+                          }
+                        })
+                        .finally(() => setChangingRecovery(false))
+                    }}
+                    className="btn-surface shrink-0"
+                  >
+                    {changingRecovery ? 'Changing…' : 'Change'}
+                  </button>
+                </div>
+              </div>
+              <div className="border-t border-sibyl-border/60 pt-4">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-[13px] font-medium text-sibyl-text">
+                      Encrypted recovery snapshots
+                    </p>
+                    <p className="mt-0.5 text-[11.5px] text-sibyl-muted">
+                      Sibyl rotates ciphertext-only snapshots before private-data changes.
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void actions.verifyVaultRecovery()}
+                      className="btn-surface"
+                    >
+                      Run recovery drill
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void actions.createVaultBackup()}
+                      className="btn-surface"
+                    >
+                      Snapshot now
+                    </button>
+                  </div>
+                </div>
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <label htmlFor="backup-retention" className="text-[12px] text-sibyl-muted">
+                    Snapshots to retain
+                  </label>
+                  <select
+                    id="backup-retention"
+                    value={settings.backupRetention}
+                    onChange={(event) =>
+                      update({
+                        backupRetention: Number(event.target.value) as
+                          RendererSettings['backupRetention']
+                      })
+                    }
+                    className="input h-8 w-24 py-0 text-[12px]"
+                  >
+                    {[1, 3, 5, 10].map((count) => (
+                      <option key={count} value={count}>
+                        {count}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {vaultBackups.length === 0 ? (
+                  <p className="text-[12px] text-sibyl-muted">
+                    A snapshot will be created before the next private-data change.
+                  </p>
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    {vaultBackups.map((backup) => (
+                      <div
+                        key={backup.id}
+                        className="flex items-center justify-between gap-3 rounded-lg border border-sibyl-border/60 px-3 py-2"
+                      >
+                        <div>
+                          <p className="text-[12.5px] text-sibyl-text">
+                            {backup.valid ? 'Verified snapshot' : 'Damaged snapshot'}
+                          </p>
+                          <p className="mt-0.5 text-[11px] text-sibyl-muted">
+                            {new Date(backup.createdAt).toLocaleString()}
+                            {backup.valid ? ` · ${backup.recordCount} encrypted records` : ''}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={!backup.valid}
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                'Restore this encrypted snapshot? Sibyl will first preserve the current vault as another snapshot, then reload.'
+                              )
+                            ) {
+                              void actions.restoreVaultBackup(backup.id)
+                            }
+                          }}
+                          className="btn-surface shrink-0 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          Restore
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </Section>
+          )}
+
+          <Section
+            title="Encrypted portability"
+            desc="Move or archive private data without writing conversation content or semantic metadata in plaintext."
+          >
+            <p className="text-[12px] leading-relaxed text-sibyl-muted">
+              A portable bundle has a fresh encryption key and its own recovery
+              passphrase. Model files and Hugging Face credentials are never included;
+              only portable model references are carried.
+            </p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => setPortableExportOpen(true)}
+                className="btn-surface justify-center"
+              >
+                Export encrypted library
+              </button>
+              <button
+                type="button"
+                onClick={() => setPortableImportOpen(true)}
+                className="btn-surface justify-center"
+              >
+                Import encrypted bundle
+              </button>
             </div>
           </Section>
 
@@ -747,6 +1033,12 @@ export function SettingsView() {
           </Section>
         </div>
       </div>
+      {portableExportOpen && (
+        <PortableExportDialog onClose={() => setPortableExportOpen(false)} />
+      )}
+      {portableImportOpen && (
+        <PortableImportDialog onClose={() => setPortableImportOpen(false)} />
+      )}
     </div>
   )
 }

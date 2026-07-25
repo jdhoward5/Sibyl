@@ -62,6 +62,7 @@ interface LoadedVoice {
   session: import('onnxruntime-node').InferenceSession
   config: PiperVoiceConfig
   sampleRate: number
+  sizeBytes: number
 }
 
 interface VoiceDownloadJob {
@@ -71,18 +72,21 @@ interface VoiceDownloadJob {
 
 const MAX_TTS_MODEL_BYTES = 200 * 1024 * 1024
 const MAX_TTS_CONFIG_BYTES = 1024 * 1024
+const MAX_CACHED_VOICES = 2
+const MAX_CACHED_VOICE_BYTES = 140 * 1024 * 1024
 
 /**
  * On-device text-to-speech via Piper (VITS) ONNX voices. Owns one loaded voice
- * session at a time, synthesizes a response sentence-by-sentence, and streams the
- * resulting audio to the renderer as Float32 PCM chunks. Speech never leaves the
- * machine; like the LLM engine, nothing here is logged that could carry message
- * content (see CLAUDE.md → Privacy).
+ * session cache, synthesizes a response sentence-by-sentence, and streams the
+ * resulting audio to the renderer as Float32 PCM chunks. The cache is bounded
+ * and inference remains strictly serialized. Speech never leaves the machine;
+ * like the LLM engine, nothing here is logged that could carry message content.
  */
 class TtsEngine extends EventEmitter {
   private available: boolean | null = null
   private availabilityError: string | undefined
-  private loaded: LoadedVoice | null = null
+  /** Small LRU: enough for a two-character scene without unbounded ONNX memory. */
+  private loadedVoices = new Map<string, LoadedVoice>()
 
   private speakingMessageId: string | null = null
   private synthesizing = false
@@ -251,9 +255,9 @@ class TtsEngine extends EventEmitter {
 
   /** Remove a downloaded voice's files and registry entry. */
   async deleteVoice(voiceId: string): Promise<void> {
-    if (this.loaded?.id === voiceId) {
-      await this.releaseSession()
-    }
+    this.stop()
+    await this.queue
+    await this.releaseVoice(voiceId)
     // Delete the exact files the registry recorded (absolute paths we wrote from
     // a catalog id) rather than reconstructing a path from the caller-supplied id —
     // a no-match id removes nothing instead of risking a path outside the voices dir.
@@ -267,9 +271,9 @@ class TtsEngine extends EventEmitter {
 
   // -- synthesis ------------------------------------------------------------
 
-  private async releaseSession(): Promise<void> {
-    const loaded = this.loaded
-    this.loaded = null
+  private async releaseVoice(voiceId: string): Promise<void> {
+    const loaded = this.loadedVoices.get(voiceId)
+    this.loadedVoices.delete(voiceId)
     if (loaded) {
       try {
         await loaded.session.release()
@@ -279,10 +283,19 @@ class TtsEngine extends EventEmitter {
     }
   }
 
+  private async releaseSessions(): Promise<void> {
+    const voiceIds = [...this.loadedVoices.keys()]
+    for (const voiceId of voiceIds) await this.releaseVoice(voiceId)
+  }
+
   /** Load (or reuse) a voice's ONNX session + config. */
   private async loadVoice(voice: InstalledVoice): Promise<LoadedVoice> {
-    if (this.loaded?.id === voice.id) return this.loaded
-    await this.releaseSession()
+    const cached = this.loadedVoices.get(voice.id)
+    if (cached) {
+      this.loadedVoices.delete(voice.id)
+      this.loadedVoices.set(voice.id, cached)
+      return cached
+    }
     const catalogVoice = findCatalogVoice(voice.id)
     if (!catalogVoice) throw new Error('This installed voice is not in the reviewed catalog.')
     await Promise.all([
@@ -305,13 +318,26 @@ class TtsEngine extends EventEmitter {
     const session = await ort.InferenceSession.create(voice.modelPath, {
       executionProviders: ['cpu']
     })
-    this.loaded = {
+    const loaded: LoadedVoice = {
       id: voice.id,
       session,
       config,
-      sampleRate: config.audio?.sample_rate ?? 22050
+      sampleRate: config.audio?.sample_rate ?? 22050,
+      sizeBytes: voice.sizeBytes
     }
-    return this.loaded
+    this.loadedVoices.set(voice.id, loaded)
+    const cachedBytes = (): number =>
+      [...this.loadedVoices.values()].reduce((sum, item) => sum + item.sizeBytes, 0)
+    while (
+      this.loadedVoices.size > 1 &&
+      (this.loadedVoices.size > MAX_CACHED_VOICES ||
+        cachedBytes() > MAX_CACHED_VOICE_BYTES)
+    ) {
+      const oldestId = this.loadedVoices.keys().next().value as string | undefined
+      if (!oldestId || oldestId === voice.id) break
+      await this.releaseVoice(oldestId)
+    }
+    return loaded
   }
 
   /** Synthesize one already-phonemized sentence into mono Float32 PCM. */
@@ -366,28 +392,31 @@ class TtsEngine extends EventEmitter {
     const abort = new AbortController()
     this.current = { id: requestId, abort }
 
-    if (!(await this.probeAvailability())) {
-      this.emitEvent({ type: 'error', requestId, messageId, error: this.availabilityError ?? 'Speech unavailable.' })
-      if (this.current?.id === requestId) this.current = null
-      return
-    }
-
-    const settings = await getSettings()
-    const voiceId = opts?.voiceId ?? settings.tts.voiceId
-    const rate = opts?.rate ?? settings.tts.rate ?? 1
-    const voice = voiceId ? await getInstalledVoice(voiceId) : null
-    if (!voice) {
-      this.emitEvent({ type: 'error', requestId, messageId, error: 'No voice is installed. Add one in Settings.' })
-      if (this.current?.id === requestId) this.current = null
-      return
-    }
-
-    this.speakingMessageId = messageId
-    this.synthesizing = true
-    void this.emitStatus()
-
     try {
+      if (!(await this.probeAvailability())) {
+        throw new Error(this.availabilityError ?? 'Speech unavailable.')
+      }
+      const settings = await getSettings()
+      const voiceId = opts?.voiceId ?? settings.tts.voiceId
+      const rate = opts?.rate ?? settings.tts.rate ?? 1
+      const voice = voiceId ? await getInstalledVoice(voiceId) : null
+      if (!voice) {
+        throw new Error('No voice is installed. Add one in Settings.')
+      }
+      if (abort.signal.aborted) {
+        this.emitEvent({ type: 'done', requestId, messageId })
+        return
+      }
+
+      this.speakingMessageId = messageId
+      this.synthesizing = true
+      void this.emitStatus()
+
       const lv = await this.loadVoice(voice)
+      if (abort.signal.aborted) {
+        this.emitEvent({ type: 'done', requestId, messageId })
+        return
+      }
       this.emitEvent({ type: 'start', requestId, messageId, sampleRate: lv.sampleRate })
 
       const spoken = plainTextForSpeech(text)
@@ -449,7 +478,7 @@ class TtsEngine extends EventEmitter {
     } catch {
       /* ignore */
     }
-    await this.releaseSession()
+    await this.releaseSessions()
   }
 }
 

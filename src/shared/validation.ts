@@ -12,11 +12,24 @@ import type {
   GenerationOptions,
   GenerationProfile,
   Persona,
+  PersonaRelationship,
+  PersonaSnapshot,
+  RoleplayFact,
+  RoleplayState,
+  SceneDirection,
+  SceneDirectorSettings,
+  ScenePersonaOverride,
   RendererSettingsPatch,
   SystemPromptPreset,
   UserCharacter
 } from './types'
-import type { ChatAbortRequest, ChatAdvanceRequest, ChatSendRequest, TtsSpeakRequest } from './ipc'
+import type {
+  ChatAbortRequest,
+  ChatAdvanceRequest,
+  ChatSendRequest,
+  TtsSpeakRequest,
+  VaultSetupRequest
+} from './ipc'
 import type { TtsSettings } from './tts'
 import { ACCENT_THEMES } from './themes'
 
@@ -30,6 +43,7 @@ export const IPC_LIMITS = {
   message: 100_000,
   conversationMessages: 10_000,
   conversationText: 5_000_000,
+  settingsText: 5_000_000,
   personas: 256,
   cast: 32,
   stopSequences: 16,
@@ -159,6 +173,42 @@ export function parseHfToken(value: unknown): string {
   return token
 }
 
+export function parseRecoveryPassphrase(value: unknown): string {
+  const passphrase = string(value, 'recoveryPassphrase', 1024, false)
+  if (passphrase.length < 12) {
+    invalid('recoveryPassphrase', 'must be at least 12 characters')
+  }
+  if (new TextEncoder().encode(passphrase).length > 1024) {
+    invalid('recoveryPassphrase', 'must be at most 1024 UTF-8 bytes')
+  }
+  return passphrase
+}
+
+export function parseVaultSetupRequest(value: unknown): VaultSetupRequest {
+  const v = object(value, 'vaultSetup')
+  keys(v, ['recoveryPassphrase', 'seamlessOnThisDevice'], 'vaultSetup')
+  return {
+    recoveryPassphrase: parseRecoveryPassphrase(v.recoveryPassphrase),
+    seamlessOnThisDevice: bool(v.seamlessOnThisDevice, 'vaultSetup.seamlessOnThisDevice')
+  }
+}
+
+export function parseVaultBackupId(value: unknown): string {
+  const id = string(value, 'vaultBackupId', 26, false)
+  if (!/^[A-Za-z0-9_-]{22}\.svb$/.test(id)) {
+    invalid('vaultBackupId', 'must be an opaque encrypted-backup identifier')
+  }
+  return id
+}
+
+export function parsePortableImportToken(value: unknown): string {
+  const token = string(value, 'portableImportToken', 64, false)
+  if (!/^[A-Za-z0-9_-]{32}$/.test(token)) {
+    invalid('portableImportToken', 'must be an opaque import-preview token')
+  }
+  return token
+}
+
 function parseGenerationOptions(
   value: unknown,
   path: string,
@@ -226,9 +276,29 @@ function parseStats(value: unknown, path: string): ChatMessage['stats'] {
 
 function parseMessage(value: unknown, path: string): ChatMessage {
   const v = object(value, path)
-  keys(v, ['id', 'role', 'content', 'createdAt', 'stats', 'error', 'stopped', 'speakerId', 'speakerName', 'director'], path)
+  keys(v, ['id', 'role', 'content', 'createdAt', 'stats', 'error', 'stopped', 'speakerId', 'speakerName', 'director', 'segments', 'directionId'], path)
   if (v.role !== 'system' && v.role !== 'user' && v.role !== 'assistant') {
     invalid(`${path}.role`, 'unsupported role')
+  }
+  let segments: ChatMessage['segments']
+  if (v.segments !== undefined) {
+    if (!Array.isArray(v.segments) || v.segments.length > 128) {
+      invalid(`${path}.segments`, 'expected an array of at most 128 items')
+    }
+    segments = v.segments.map((item, index) => {
+      const segmentPath = `${path}.segments[${index}]`
+      const segment = object(item, segmentPath)
+      keys(segment, ['id', 'kind', 'content', 'visibility'], segmentPath)
+      if (!['dialogue', 'action', 'thought', 'note'].includes(segment.kind as string)) {
+        invalid(`${segmentPath}.kind`, 'unsupported segment kind')
+      }
+      return {
+        id: parseCanonicalId(segment.id, `${segmentPath}.id`),
+        kind: segment.kind as NonNullable<ChatMessage['segments']>[number]['kind'],
+        content: string(segment.content, `${segmentPath}.content`, IPC_LIMITS.message),
+        visibility: parseKnowledgeVisibility(segment.visibility, `${segmentPath}.visibility`)
+      }
+    })
   }
   return {
     id: parseCanonicalId(v.id, `${path}.id`),
@@ -240,8 +310,30 @@ function parseMessage(value: unknown, path: string): ChatMessage {
     stopped: optional(v.stopped, (x) => bool(x, `${path}.stopped`)),
     speakerId: optional(v.speakerId, (x) => parseCanonicalId(x, `${path}.speakerId`)),
     speakerName: optional(v.speakerName, (x) => string(x, `${path}.speakerName`, 200, false)),
-    director: optional(v.director, (x) => bool(x, `${path}.director`))
+    director: optional(v.director, (x) => bool(x, `${path}.director`)),
+    segments,
+    directionId: optional(v.directionId, (x) => parseCanonicalId(x, `${path}.directionId`))
   }
+}
+
+function parseKnowledgeVisibility(value: unknown, path: string) {
+  const v = object(value, path)
+  keys(v, ['kind', 'characterIds'], path)
+  if (v.kind === 'public') {
+    if (v.characterIds !== undefined) invalid(`${path}.characterIds`, 'not allowed for public visibility')
+    return { kind: 'public' as const }
+  }
+  if (v.kind !== 'private') invalid(`${path}.kind`, 'unsupported visibility')
+  if (!Array.isArray(v.characterIds) || v.characterIds.length < 1 || v.characterIds.length > IPC_LIMITS.cast) {
+    invalid(`${path}.characterIds`, `expected 1–${IPC_LIMITS.cast} character ids`)
+  }
+  const characterIds = v.characterIds.map((id, index) =>
+    parseCanonicalId(id, `${path}.characterIds[${index}]`)
+  )
+  if (new Set(characterIds).size !== characterIds.length) {
+    invalid(`${path}.characterIds`, 'character ids must be unique')
+  }
+  return { kind: 'private' as const, characterIds }
 }
 
 function parseCompaction(value: unknown, path: string): CompactionInfo {
@@ -279,6 +371,180 @@ function parseUserCharacter(value: unknown, path: string): UserCharacter {
   }
 }
 
+function parsePersonaSnapshot(value: unknown, path: string): PersonaSnapshot {
+  const v = object(value, path)
+  keys(v, ['schemaVersion', 'sourcePersonaId', 'sourceVersion', 'capturedAt', 'persona'], path)
+  if (v.schemaVersion !== 1) invalid(`${path}.schemaVersion`, 'unsupported snapshot schema')
+  return {
+    schemaVersion: 1,
+    sourcePersonaId: parseCanonicalId(v.sourcePersonaId, `${path}.sourcePersonaId`),
+    sourceVersion: finite(v.sourceVersion, `${path}.sourceVersion`, 1, 1_000_000_000, true),
+    capturedAt: string(v.capturedAt, `${path}.capturedAt`, 64, false),
+    persona: parsePersona(v.persona, `${path}.persona`)
+  }
+}
+
+function parseStringList(value: unknown, path: string, max = 64): string[] {
+  if (!Array.isArray(value) || value.length > max) {
+    invalid(path, `expected an array of at most ${max} items`)
+  }
+  return value.map((item, index) => string(item, `${path}[${index}]`, 10_000, false))
+}
+
+function parseRelationship(value: unknown, path: string): PersonaRelationship {
+  const v = object(value, path)
+  keys(v, ['personaId', 'summary', 'visibility'], path)
+  if (v.visibility !== 'public' && v.visibility !== 'private') {
+    invalid(`${path}.visibility`, 'unsupported visibility')
+  }
+  return {
+    personaId: parseCanonicalId(v.personaId, `${path}.personaId`),
+    summary: string(v.summary, `${path}.summary`, 10_000, false),
+    visibility: v.visibility
+  }
+}
+
+function parsePersonaOverride(value: unknown, path: string): ScenePersonaOverride {
+  const v = object(value, path)
+  keys(v, ['personaId', 'publicDescription', 'privateMotivations', 'secrets', 'behavioralConstraints', 'speechGuidance', 'relationships', 'voice'], path)
+  let relationships: PersonaRelationship[] | undefined
+  if (v.relationships !== undefined) {
+    if (!Array.isArray(v.relationships) || v.relationships.length > 128) {
+      invalid(`${path}.relationships`, 'expected an array of at most 128 items')
+    }
+    relationships = v.relationships.map((item, index) =>
+      parseRelationship(item, `${path}.relationships[${index}]`)
+    )
+  }
+  let voice: ScenePersonaOverride['voice']
+  if (v.voice !== undefined) {
+    const source = object(v.voice, `${path}.voice`)
+    keys(source, ['voiceId', 'rate'], `${path}.voice`)
+    voice = {
+      voiceId: optional(source.voiceId, (item) => parseCanonicalId(item, `${path}.voice.voiceId`)),
+      rate: optional(source.rate, (item) => finite(item, `${path}.voice.rate`, 0.5, 2))
+    }
+  }
+  return {
+    personaId: parseCanonicalId(v.personaId, `${path}.personaId`),
+    publicDescription: optional(v.publicDescription, (item) => string(item, `${path}.publicDescription`, 10_000)),
+    privateMotivations: optional(v.privateMotivations, (item) => parseStringList(item, `${path}.privateMotivations`)),
+    secrets: optional(v.secrets, (item) => parseStringList(item, `${path}.secrets`)),
+    behavioralConstraints: optional(v.behavioralConstraints, (item) => parseStringList(item, `${path}.behavioralConstraints`)),
+    speechGuidance: optional(v.speechGuidance, (item) => string(item, `${path}.speechGuidance`, 10_000)),
+    relationships,
+    voice
+  }
+}
+
+function parseRoleplayFact(value: unknown, path: string): RoleplayFact {
+  const v = object(value, path)
+  keys(v, ['id', 'category', 'text', 'visibility', 'provenanceMessageIds', 'userAuthored', 'pinned', 'updatedAt'], path)
+  const categories: RoleplayFact['category'][] = [
+    'time', 'location', 'object', 'condition', 'obligation', 'relationship', 'plot', 'goal', 'other'
+  ]
+  if (!categories.includes(v.category as RoleplayFact['category'])) {
+    invalid(`${path}.category`, 'unsupported fact category')
+  }
+  const provenanceMessageIds = parseStringList(v.provenanceMessageIds, `${path}.provenanceMessageIds`, 256)
+    .map((id, index) => parseCanonicalId(id, `${path}.provenanceMessageIds[${index}]`))
+  return {
+    id: parseCanonicalId(v.id, `${path}.id`),
+    category: v.category as RoleplayFact['category'],
+    text: string(v.text, `${path}.text`, 10_000, false),
+    visibility: parseKnowledgeVisibility(v.visibility, `${path}.visibility`),
+    provenanceMessageIds,
+    userAuthored: bool(v.userAuthored, `${path}.userAuthored`),
+    pinned: bool(v.pinned, `${path}.pinned`),
+    updatedAt: string(v.updatedAt, `${path}.updatedAt`, 64, false)
+  }
+}
+
+function parseRoleplayState(value: unknown, path: string): RoleplayState {
+  const v = object(value, path)
+  keys(v, ['schemaVersion', 'recap', 'facts', 'beatsSinceMaintenance', 'maintainedAt'], path)
+  if (v.schemaVersion !== 1) invalid(`${path}.schemaVersion`, 'unsupported roleplay-state schema')
+  if (!Array.isArray(v.facts) || v.facts.length > 2_000) {
+    invalid(`${path}.facts`, 'expected an array of at most 2000 facts')
+  }
+  const facts = v.facts.map((item, index) => parseRoleplayFact(item, `${path}.facts[${index}]`))
+  if (new Set(facts.map((fact) => fact.id)).size !== facts.length) {
+    invalid(`${path}.facts`, 'fact ids must be unique')
+  }
+  return {
+    schemaVersion: 1,
+    recap: optional(v.recap, (item) => string(item, `${path}.recap`, IPC_LIMITS.message)),
+    facts,
+    beatsSinceMaintenance: finite(v.beatsSinceMaintenance, `${path}.beatsSinceMaintenance`, 0, 1_000_000, true),
+    maintainedAt: optional(v.maintainedAt, (item) => string(item, `${path}.maintainedAt`, 64, false))
+  }
+}
+
+function parseDirection(value: unknown, path: string): SceneDirection {
+  const v = object(value, path)
+  keys(v, ['id', 'content', 'target', 'scope', 'enabled', 'createdAt', 'consumedAt', 'consumedByMessageId', 'resolvedAt'], path)
+  if (!['next-beat', 'until-resolved', 'persistent', 'scene-metadata'].includes(v.scope as string)) {
+    invalid(`${path}.scope`, 'unsupported direction scope')
+  }
+  const target = object(v.target, `${path}.target`)
+  keys(target, ['kind', 'speakerId'], `${path}.target`)
+  let parsedTarget: SceneDirection['target']
+  if (target.kind === 'cast') {
+    if (target.speakerId !== undefined) invalid(`${path}.target.speakerId`, 'not allowed for cast target')
+    parsedTarget = { kind: 'cast' }
+  } else if (target.kind === 'speaker') {
+    parsedTarget = {
+      kind: 'speaker',
+      speakerId: parseCanonicalId(target.speakerId, `${path}.target.speakerId`)
+    }
+  } else {
+    invalid(`${path}.target.kind`, 'unsupported direction target')
+  }
+  return {
+    id: parseCanonicalId(v.id, `${path}.id`),
+    content: string(v.content, `${path}.content`, IPC_LIMITS.message, false),
+    target: parsedTarget,
+    scope: v.scope as SceneDirection['scope'],
+    enabled: bool(v.enabled, `${path}.enabled`),
+    createdAt: string(v.createdAt, `${path}.createdAt`, 64, false),
+    consumedAt: optional(v.consumedAt, (item) => string(item, `${path}.consumedAt`, 64, false)),
+    consumedByMessageId: optional(v.consumedByMessageId, (item) => parseCanonicalId(item, `${path}.consumedByMessageId`)),
+    resolvedAt: optional(v.resolvedAt, (item) => string(item, `${path}.resolvedAt`, 64, false))
+  }
+}
+
+function parseDirectorSettings(value: unknown, path: string): SceneDirectorSettings {
+  const v = object(value, path)
+  keys(v, ['enabled', 'useModel', 'sceneGoal', 'pacing', 'initiative', 'interruption', 'inspectIntent'], path)
+  if (!['slow', 'balanced', 'fast'].includes(v.pacing as string)) {
+    invalid(`${path}.pacing`, 'unsupported pacing')
+  }
+  if (!['low', 'balanced', 'high'].includes(v.initiative as string)) {
+    invalid(`${path}.initiative`, 'unsupported initiative')
+  }
+  if (!['never', 'natural-pauses', 'often'].includes(v.interruption as string)) {
+    invalid(`${path}.interruption`, 'unsupported interruption policy')
+  }
+  return {
+    enabled: bool(v.enabled, `${path}.enabled`),
+    useModel: bool(v.useModel, `${path}.useModel`),
+    sceneGoal: optional(v.sceneGoal, (item) => string(item, `${path}.sceneGoal`, 10_000)),
+    pacing: v.pacing as SceneDirectorSettings['pacing'],
+    initiative: v.initiative as SceneDirectorSettings['initiative'],
+    interruption: v.interruption as SceneDirectorSettings['interruption'],
+    inspectIntent: bool(v.inspectIntent, `${path}.inspectIntent`)
+  }
+}
+
+function parsePersonaVoice(value: unknown, path: string): Persona['voice'] {
+  const source = object(value, path)
+  keys(source, ['voiceId', 'rate'], path)
+  return {
+    voiceId: optional(source.voiceId, (item) => parseCanonicalId(item, `${path}.voiceId`)),
+    rate: optional(source.rate, (item) => finite(item, `${path}.rate`, 0.5, 2))
+  }
+}
+
 export function parseConversation(value: unknown): Conversation {
   const path = 'conversation'
   const v = object(value, path)
@@ -296,7 +562,16 @@ export function parseConversation(value: unknown): Conversation {
       'personaId',
       'userCharacter',
       'cast',
-      'scenePremise'
+      'scenePremise',
+      'schemaVersion',
+      'personaSnapshot',
+      'castSnapshots',
+      'personaOverrides',
+      'knowledgeMode',
+      'roleplayState',
+      'directions',
+      'director',
+      'sceneVoice'
     ],
     path
   )
@@ -309,10 +584,17 @@ export function parseConversation(value: unknown): Conversation {
   for (let i = 0; i < v.messages.length; i++) {
     const message = parseMessage(v.messages[i], `${path}.messages[${i}]`)
     totalText += message.content.length
+    totalText += message.segments?.reduce((sum, segment) => sum + segment.content.length, 0) ?? 0
     if (totalText > IPC_LIMITS.conversationText) {
       invalid(`${path}.messages`, `combined text must be at most ${IPC_LIMITS.conversationText} characters`)
     }
     messages.push(message)
+    if (
+      message.segments &&
+      new Set(message.segments.map((segment) => segment.id)).size !== message.segments.length
+    ) {
+      invalid(`${path}.messages[${i}].segments`, 'segment ids must be unique')
+    }
   }
   if (new Set(messages.map((m) => m.id)).size !== messages.length) {
     invalid(`${path}.messages`, 'message ids must be unique')
@@ -324,7 +606,134 @@ export function parseConversation(value: unknown): Conversation {
     cast = v.cast.map((id, i) => parseCanonicalId(id, `${path}.cast[${i}]`))
     if (new Set(cast).size !== cast.length) invalid(`${path}.cast`, 'persona ids must be unique')
   }
+  let castSnapshots: PersonaSnapshot[] | undefined
+  if (v.castSnapshots !== undefined) {
+    if (!Array.isArray(v.castSnapshots) || v.castSnapshots.length > IPC_LIMITS.cast) {
+      invalid(`${path}.castSnapshots`, `expected an array of at most ${IPC_LIMITS.cast} items`)
+    }
+    castSnapshots = v.castSnapshots.map((item, index) =>
+      parsePersonaSnapshot(item, `${path}.castSnapshots[${index}]`)
+    )
+  }
+  let personaOverrides: ScenePersonaOverride[] | undefined
+  if (v.personaOverrides !== undefined) {
+    if (!Array.isArray(v.personaOverrides) || v.personaOverrides.length > IPC_LIMITS.cast) {
+      invalid(`${path}.personaOverrides`, `expected an array of at most ${IPC_LIMITS.cast} items`)
+    }
+    personaOverrides = v.personaOverrides.map((item, index) =>
+      parsePersonaOverride(item, `${path}.personaOverrides[${index}]`)
+    )
+  }
+  let directions: SceneDirection[] | undefined
+  if (v.directions !== undefined) {
+    if (!Array.isArray(v.directions) || v.directions.length > 1_000) {
+      invalid(`${path}.directions`, 'expected an array of at most 1000 directions')
+    }
+    directions = v.directions.map((item, index) => parseDirection(item, `${path}.directions[${index}]`))
+  }
+  if (v.schemaVersion !== undefined && v.schemaVersion !== 2) {
+    invalid(`${path}.schemaVersion`, 'unsupported conversation schema')
+  }
+  if (v.knowledgeMode !== undefined && v.knowledgeMode !== 'scoped' && v.knowledgeMode !== 'public-only') {
+    invalid(`${path}.knowledgeMode`, 'unsupported knowledge mode')
+  }
+  if (
+    castSnapshots &&
+    new Set(castSnapshots.map((snapshot) => snapshot.sourcePersonaId)).size !== castSnapshots.length
+  ) {
+    invalid(`${path}.castSnapshots`, 'snapshot persona ids must be unique')
+  }
+  if (
+    personaOverrides &&
+    new Set(personaOverrides.map((override) => override.personaId)).size !==
+      personaOverrides.length
+  ) {
+    invalid(`${path}.personaOverrides`, 'override persona ids must be unique')
+  }
+  if (personaOverrides?.some((override) => !cast?.includes(override.personaId))) {
+    invalid(`${path}.personaOverrides`, 'overrides must target cast participants')
+  }
+  if (
+    castSnapshots?.some(
+      (snapshot) =>
+        snapshot.persona.id !== snapshot.sourcePersonaId ||
+        (cast && !cast.includes(snapshot.sourcePersonaId))
+    )
+  ) {
+    invalid(`${path}.castSnapshots`, 'snapshots must match cast participant ids')
+  }
+  const personaSnapshot = optional(v.personaSnapshot, (x) =>
+    parsePersonaSnapshot(x, `${path}.personaSnapshot`)
+  )
+  const personaId = optional(v.personaId, (x) => parseCanonicalId(x, `${path}.personaId`))
+  if (
+    personaSnapshot &&
+    (personaSnapshot.persona.id !== personaSnapshot.sourcePersonaId ||
+      (personaId && personaSnapshot.sourcePersonaId !== personaId))
+  ) {
+    invalid(`${path}.personaSnapshot`, 'snapshot must match the conversation persona id')
+  }
+  const roleplayState = optional(v.roleplayState, (x) =>
+    parseRoleplayState(x, `${path}.roleplayState`)
+  )
+  const messageIds = new Set(messages.map((message) => message.id))
+  for (const fact of roleplayState?.facts ?? []) {
+    if (!fact.userAuthored && fact.provenanceMessageIds.length === 0) {
+      invalid(`${path}.roleplayState.facts`, 'extracted facts require provenance')
+    }
+    if (fact.provenanceMessageIds.some((id) => !messageIds.has(id))) {
+      invalid(`${path}.roleplayState.facts`, 'fact provenance must reference a message')
+    }
+  }
+  for (const direction of directions ?? []) {
+    if (
+      direction.target.kind === 'speaker' &&
+      (!cast || !cast.includes(direction.target.speakerId))
+    ) {
+      invalid(`${path}.directions`, 'target speaker must be in the cast')
+    }
+    if (direction.consumedByMessageId && !messageIds.has(direction.consumedByMessageId)) {
+      invalid(`${path}.directions`, 'consumed direction must reference a message')
+    }
+  }
+  const directionIds = new Set((directions ?? []).map((direction) => direction.id))
+  if (directionIds.size !== (directions?.length ?? 0)) {
+    invalid(`${path}.directions`, 'direction ids must be unique')
+  }
+  if (
+    messages.some(
+      (message) => message.directionId && !directionIds.has(message.directionId)
+    )
+  ) {
+    invalid(`${path}.messages`, 'director-note links must reference a direction')
+  }
+  const director = optional(v.director, (item) =>
+    parseDirectorSettings(item, `${path}.director`)
+  )
+  const sceneVoice = optional(v.sceneVoice, (item) =>
+    parsePersonaVoice(item, `${path}.sceneVoice`)
+  )
+  const semanticSize = JSON.stringify({
+    compaction: v.compaction,
+    overrides: v.overrides,
+    personaSnapshot,
+    castSnapshots,
+    personaOverrides,
+    userCharacter: v.userCharacter,
+    roleplayState,
+    directions,
+    director,
+    sceneVoice,
+    scenePremise: v.scenePremise
+  }).length
+  if (totalText + semanticSize > IPC_LIMITS.conversationText) {
+    invalid(
+      path,
+      `combined transcript and roleplay data must be at most ${IPC_LIMITS.conversationText} characters`
+    )
+  }
   return {
+    schemaVersion: v.schemaVersion as 2 | undefined,
     id: parseCanonicalId(v.id, `${path}.id`),
     title: string(v.title, `${path}.title`, 500),
     modelId: nullable(v.modelId, (x) => parseModelId(x, `${path}.modelId`)),
@@ -333,9 +742,17 @@ export function parseConversation(value: unknown): Conversation {
     updatedAt: string(v.updatedAt, `${path}.updatedAt`, 64, false),
     compaction: optional(v.compaction, (x) => parseCompaction(x, `${path}.compaction`)),
     overrides: optional(v.overrides, (x) => parseOverrides(x, `${path}.overrides`)),
-    personaId: optional(v.personaId, (x) => parseCanonicalId(x, `${path}.personaId`)),
+    personaId,
+    personaSnapshot,
     userCharacter: optional(v.userCharacter, (x) => parseUserCharacter(x, `${path}.userCharacter`)),
     cast,
+    castSnapshots,
+    personaOverrides,
+    knowledgeMode: v.knowledgeMode as Conversation['knowledgeMode'],
+    roleplayState,
+    directions,
+    director,
+    sceneVoice,
     scenePremise: optional(v.scenePremise, (x) => string(x, `${path}.scenePremise`, 10_000))
   }
 }
@@ -476,9 +893,30 @@ function parseTtsSettings(value: unknown, path: string): TtsSettings {
   }
 }
 
-function parsePersona(value: unknown, path: string): Persona {
+function parseAccessibilitySettings(
+  value: unknown,
+  path: string
+): AppSettings['accessibility'] {
   const v = object(value, path)
-  keys(v, ['id', 'name', 'role', 'brief', 'greeting', 'avatar', 'voiceTags', 'generation'], path)
+  keys(v, ['reducedMotion', 'highContrast', 'textScale'], path)
+  const textScale = finite(v.textScale, `${path}.textScale`, 1, 1.25)
+  if (![1, 1.125, 1.25].includes(textScale)) {
+    invalid(`${path}.textScale`, 'unsupported text scale')
+  }
+  return {
+    reducedMotion: bool(v.reducedMotion, `${path}.reducedMotion`),
+    highContrast: bool(v.highContrast, `${path}.highContrast`),
+    textScale: textScale as AppSettings['accessibility']['textScale']
+  }
+}
+
+export function parsePersona(value: unknown, path = 'persona'): Persona {
+  const v = object(value, path)
+  keys(v, [
+    'schemaVersion', 'version', 'id', 'name', 'role', 'brief', 'greeting', 'avatar',
+    'voiceTags', 'generation', 'publicDescription', 'privateMotivations', 'secrets',
+    'behavioralConstraints', 'speechGuidance', 'relationships', 'voice'
+  ], path)
   const avatar = object(v.avatar, `${path}.avatar`)
   keys(avatar, ['monogram', 'gradient'], `${path}.avatar`)
   if (!Array.isArray(avatar.gradient) || avatar.gradient.length !== 2) {
@@ -487,7 +925,25 @@ function parsePersona(value: unknown, path: string): Persona {
   if (!Array.isArray(v.voiceTags) || v.voiceTags.length > 32) {
     invalid(`${path}.voiceTags`, 'expected an array of at most 32 items')
   }
+  if (v.schemaVersion !== undefined && v.schemaVersion !== 2) {
+    invalid(`${path}.schemaVersion`, 'unsupported persona schema')
+  }
+  let relationships: PersonaRelationship[] | undefined
+  if (v.relationships !== undefined) {
+    if (!Array.isArray(v.relationships) || v.relationships.length > 128) {
+      invalid(`${path}.relationships`, 'expected an array of at most 128 items')
+    }
+    relationships = v.relationships.map((item, index) =>
+      parseRelationship(item, `${path}.relationships[${index}]`)
+    )
+  }
+  let voice: Persona['voice']
+  if (v.voice !== undefined) {
+    voice = parsePersonaVoice(v.voice, `${path}.voice`)
+  }
   return {
+    schemaVersion: v.schemaVersion as 2 | undefined,
+    version: optional(v.version, (item) => finite(item, `${path}.version`, 1, 1_000_000_000, true)),
     id: parseCanonicalId(v.id, `${path}.id`),
     name: string(v.name, `${path}.name`, 200, false),
     role: string(v.role, `${path}.role`, 500),
@@ -501,7 +957,14 @@ function parsePersona(value: unknown, path: string): Persona {
       ]
     },
     voiceTags: v.voiceTags.map((tag, i) => string(tag, `${path}.voiceTags[${i}]`, 100, false)),
-    generation: optional(v.generation, (x) => parseGenerationOptions(x, `${path}.generation`))
+    generation: optional(v.generation, (x) => parseGenerationOptions(x, `${path}.generation`)),
+    publicDescription: optional(v.publicDescription, (item) => string(item, `${path}.publicDescription`, 10_000)),
+    privateMotivations: optional(v.privateMotivations, (item) => parseStringList(item, `${path}.privateMotivations`)),
+    secrets: optional(v.secrets, (item) => parseStringList(item, `${path}.secrets`)),
+    behavioralConstraints: optional(v.behavioralConstraints, (item) => parseStringList(item, `${path}.behavioralConstraints`)),
+    speechGuidance: optional(v.speechGuidance, (item) => string(item, `${path}.speechGuidance`, 10_000)),
+    relationships,
+    voice
   }
 }
 
@@ -542,6 +1005,8 @@ export function parseRendererSettingsPatch(value: unknown): RendererSettingsPatc
       'promptPresets',
       'generationProfiles',
       'tts',
+      'accessibility',
+      'backupRetention',
       'telemetry'
     ],
     path
@@ -600,8 +1065,23 @@ export function parseRendererSettingsPatch(value: unknown): RendererSettingsPatc
     )
   }
   if (v.tts !== undefined) out.tts = parseTtsSettings(v.tts, `${path}.tts`)
+  if (v.accessibility !== undefined) {
+    out.accessibility = parseAccessibilitySettings(
+      v.accessibility,
+      `${path}.accessibility`
+    )
+  }
+  if (v.backupRetention !== undefined) {
+    if (![1, 3, 5, 10].includes(v.backupRetention as number)) {
+      invalid(`${path}.backupRetention`, 'expected 1, 3, 5, or 10 snapshots')
+    }
+    out.backupRetention = v.backupRetention as AppSettings['backupRetention']
+  }
   if (v.telemetry !== undefined && v.telemetry !== false) invalid(`${path}.telemetry`, 'must remain false')
   if (v.telemetry !== undefined) out.telemetry = false
+  if (JSON.stringify(out).length > IPC_LIMITS.settingsText) {
+    invalid(path, `combined settings text must be at most ${IPC_LIMITS.settingsText} characters`)
+  }
   return out
 }
 
