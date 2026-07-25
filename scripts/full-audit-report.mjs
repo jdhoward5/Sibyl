@@ -1,16 +1,12 @@
 import { spawnSync } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { npmInvocation } from './npm-invocation.mjs'
 
 const output = path.resolve(process.argv[2] ?? 'audit-full.json')
-const command = process.env.npm_execpath
-  ? process.execPath
-  : process.platform === 'win32'
-    ? 'npm.cmd'
-    : 'npm'
-const args = process.env.npm_execpath
-  ? [process.env.npm_execpath, 'audit', '--json']
-  : ['audit', '--json']
+const invocation = npmInvocation()
+const command = invocation.command
+const args = [...invocation.args, 'audit', '--json']
 const result = spawnSync(command, args, {
   encoding: 'utf8',
   maxBuffer: 32 * 1024 * 1024,
