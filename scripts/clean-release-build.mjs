@@ -172,6 +172,7 @@ try {
       env: {
         ...stageEnv,
         SIBYL_SMOKE: '1',
+        SIBYL_SMOKE_ISOLATED: '1',
         SIBYL_SMOKE_MODEL: model,
         SIBYL_SMOKE_OUT: smokeOutput
       },
