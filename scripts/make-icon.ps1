@@ -132,7 +132,4 @@ $bw.Flush()
 New-Item -ItemType Directory -Force -Path build | Out-Null
 [System.IO.File]::WriteAllBytes((Join-Path (Get-Location) 'build\icon.ico'), $out.ToArray())
 
-# Also drop a 256px preview PNG for docs/inspection.
-[System.IO.File]::WriteAllBytes((Join-Path (Get-Location) 'docs\icon-preview.png'), [byte[]]$pngs[0])
-
 Write-Host ("Wrote build/icon.ico ({0} sizes, {1:N0} bytes total)" -f $sizes.Count, $out.Length)

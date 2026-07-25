@@ -19,6 +19,3 @@ dist*.log
 install.log
 reinstall*.log
 patch-package-error.json.gz
-
-# Local development punchlist / roadmap notes (not shipped)
-improvements.md
