@@ -10,6 +10,9 @@ describe('release harness', () => {
     )
 
     expect(script).toContain("SIBYL_SMOKE_ISOLATED: '1'")
+    expect(script).toContain(
+      "mkdtempSync(path.join(os.tmpdir(), 'sibyl-release-smoke-'))"
+    )
     expect(script).toContain('`--user-data-dir=${smokeProfile}`')
   })
 })

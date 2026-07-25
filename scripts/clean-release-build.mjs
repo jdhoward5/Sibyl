@@ -107,11 +107,17 @@ const temporaryParent =
 mkdirSync(temporaryParent, { recursive: true })
 const temporaryRoot = mkdtempSync(path.join(temporaryParent, 'sibyl-release-'))
 const checkout = path.join(temporaryRoot, 'checkout')
-const smokeProfile = path.join(temporaryRoot, 'profile')
-const smokeOutput = path.join(temporaryRoot, 'smoke-output')
+let smokeRoot
+let smokeProfile
+let smokeOutput
 let worktreeAdded = false
 let releaseError
 try {
+  if (!skipSmoke) {
+    smokeRoot = mkdtempSync(path.join(os.tmpdir(), 'sibyl-release-smoke-'))
+    smokeProfile = path.join(smokeRoot, 'profile')
+    smokeOutput = path.join(smokeRoot, 'output')
+  }
   run('git', ['worktree', 'add', '--detach', checkout, 'HEAD'])
   worktreeAdded = true
   runNpm(['ci'], { cwd: checkout, timeout: 20 * 60_000 })
@@ -242,6 +248,14 @@ try {
   } catch (error) {
     releaseError ??= error
     process.stderr.write(`Release temporary-directory cleanup failed: ${error.message}\n`)
+  }
+  if (smokeRoot) {
+    try {
+      rmSync(smokeRoot, { recursive: true, force: true })
+    } catch (error) {
+      releaseError ??= error
+      process.stderr.write(`Release smoke-directory cleanup failed: ${error.message}\n`)
+    }
   }
 }
 if (releaseError) throw releaseError
