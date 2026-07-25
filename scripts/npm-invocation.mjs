@@ -14,8 +14,8 @@ export function npmInvocation({
     return { command: 'npm', args: [] }
   }
 
-  const npmCli = path.join(
-    path.dirname(execPath),
+  const npmCli = path.win32.join(
+    path.win32.dirname(execPath),
     'node_modules',
     'npm',
     'bin',
