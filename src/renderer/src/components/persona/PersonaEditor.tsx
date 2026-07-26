@@ -40,8 +40,10 @@ function blankPersona(): Persona {
   }
 }
 
-const lines = (value: string): string[] =>
-  value.split('\n').map((item) => item.trim()).filter(Boolean)
+const editableLines = (value: string): string[] => value.split('\n')
+
+const normalizedLines = (value: string[] | undefined): string[] | undefined =>
+  value?.map((item) => item.trim()).filter(Boolean)
 
 interface Props {
   /** Persona to open in the form; omit/null to start a new one. */
@@ -110,6 +112,9 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
       greeting: draft.greeting?.trim() || undefined,
       avatar: { ...draft.avatar, monogram: initialsOf(draft.name) },
       generation: samplingOn ? (draft.generation ?? CREATIVE) : undefined,
+      privateMotivations: normalizedLines(draft.privateMotivations),
+      secrets: normalizedLines(draft.secrets),
+      behavioralConstraints: normalizedLines(draft.behavioralConstraints),
       relationships: draft.relationships
         ?.filter((relationship) => relationship.personaId && relationship.summary.trim())
         .map((relationship) => ({ ...relationship, summary: relationship.summary.trim() }))
@@ -229,8 +234,9 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
                 <div key={field} className="mb-3">
                   <label className="mb-1 block text-[11px] text-sibyl-muted">{label}</label>
                   <textarea
+                    aria-label={label.split(' ·')[0]}
                     value={(draft[field] ?? []).join('\n')}
-                    onChange={(e) => set({ [field]: lines(e.target.value) })}
+                    onChange={(e) => set({ [field]: editableLines(e.target.value) })}
                     rows={2}
                     className="input resize-none text-[12.5px]"
                   />

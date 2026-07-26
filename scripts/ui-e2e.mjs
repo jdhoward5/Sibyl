@@ -153,6 +153,47 @@ async function run() {
     await page.getByText('Character library', { exact: true }).waitFor()
     await shot('01-characters.png')
     await assertAccessible('Characters')
+
+    // Character list fields must preserve whitespace while the user is typing.
+    // They are normalized only when the character is saved.
+    await page.getByRole('button', { name: 'Create character' }).first().click()
+    await page.getByPlaceholder('Character name').fill('Whitespace tester')
+    const privateMotivations = page.getByLabel('Private motivations', { exact: true })
+    await privateMotivations.focus()
+    await page.keyboard.type('Protect the')
+    await page.keyboard.press('Space')
+    await page.keyboard.type('archive')
+    await page.keyboard.press('Enter')
+    await page.keyboard.type('Earn their trust')
+    assert(
+      (await privateMotivations.inputValue()) === 'Protect the archive\nEarn their trust',
+      'private motivations accept spaces and newlines while typing'
+    )
+    const secrets = page.getByLabel('Secrets', { exact: true })
+    await secrets.focus()
+    await page.keyboard.type('Knows the')
+    await page.keyboard.press('Space')
+    await page.keyboard.type('hidden route')
+    await page.keyboard.press('Enter')
+    await page.keyboard.type('Lost the original map')
+    assert(
+      (await secrets.inputValue()) === 'Knows the hidden route\nLost the original map',
+      'secrets accept spaces and newlines while typing'
+    )
+    await page.getByRole('button', { name: 'Save', exact: true }).click()
+    await page.waitForFunction(async () => {
+      const result = await window.sibyl.settings.get()
+      const persona = result.data?.personas.find(
+        (candidate) => candidate.name === 'Whitespace tester'
+      )
+      return (
+        persona?.privateMotivations?.join('|') ===
+          'Protect the archive|Earn their trust' &&
+        persona.secrets?.join('|') === 'Knows the hidden route|Lost the original map'
+      )
+    })
+    assert(true, 'character list fields persist as normalized lines')
+
     await page.getByRole('button', { name: 'Models', exact: true }).click()
     await page.getByText('On this machine', { exact: true }).waitFor()
     await assertAccessible('Installed models')
