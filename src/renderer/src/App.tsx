@@ -3,7 +3,7 @@ import { actions, useStore } from './store'
 import { TitleBar } from './components/TitleBar'
 import { Rail } from './components/Rail'
 import { ChatView } from './components/chat/ChatView'
-import { DiscoverView } from './components/discover/DiscoverView'
+import { CharactersView } from './components/persona/CharactersView'
 import { ModelsView } from './components/models/ModelsView'
 import { SettingsView } from './components/settings/SettingsView'
 import { DownloadsBar } from './components/common/DownloadsBar'
@@ -50,10 +50,10 @@ export default function App() {
         <div className="flex min-h-0 flex-1">
           <Rail />
           <main className="flex min-w-0 flex-1 flex-col">
-            {view === 'chat' ? (
+            {view === 'studio' ? (
               <ChatView />
-            ) : view === 'discover' ? (
-              <DiscoverView />
+            ) : view === 'characters' ? (
+              <CharactersView />
             ) : view === 'models' ? (
               <ModelsView />
             ) : (

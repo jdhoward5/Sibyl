@@ -1,5 +1,5 @@
 import { useStore } from '../store'
-import { SparkIcon } from '../lib/icons'
+import { SibylSigilIcon } from '../lib/icons'
 import { EngineBadge } from './common/EngineBadge'
 
 export function TitleBar() {
@@ -16,10 +16,10 @@ export function TitleBar() {
       }`}
     >
       <div className="flex items-center gap-2">
-        <div className="flex h-6 w-6 items-center justify-center rounded-md bg-gradient-to-br from-sibyl-accent to-sibyl-accent-2 text-white shadow-md shadow-sibyl-accent/30">
-          <SparkIcon size={15} />
+        <div className="sigil-frame h-7 w-7">
+          <SibylSigilIcon size={17} />
         </div>
-        <span className="text-[13px] font-semibold tracking-wide text-sibyl-text">Sibyl</span>
+        <span className="text-[13px] font-semibold tracking-[0.04em] text-sibyl-text">Sibyl</span>
         {appInfo && (
           <span className="text-[11px] text-sibyl-muted">v{appInfo.version}</span>
         )}

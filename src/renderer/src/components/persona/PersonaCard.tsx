@@ -31,7 +31,7 @@ export function PersonaCard({
       <div className="mb-3 flex items-center gap-3">
         <Avatar avatar={persona.avatar} size={40} glow={false} />
         <div className="min-w-0">
-          <div className="truncate font-mono text-[14px] font-bold text-sibyl-text">{persona.name}</div>
+          <div className="truncate text-[14px] font-semibold text-sibyl-text">{persona.name}</div>
           {persona.role && <div className="truncate text-[12px] text-sibyl-muted">{persona.role}</div>}
         </div>
       </div>

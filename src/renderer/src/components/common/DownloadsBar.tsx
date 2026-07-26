@@ -40,7 +40,7 @@ export function DownloadsBar() {
                 </div>
                 <div className="h-1.5 overflow-hidden rounded-full bg-sibyl-bg">
                   <div
-                    className="h-full rounded-full bg-gradient-to-r from-sibyl-accent to-sibyl-accent-2 transition-all duration-300"
+                    className="h-full rounded-full bg-sibyl-accent transition-all duration-300"
                     style={{ width: `${Math.min(100, pct)}%` }}
                   />
                 </div>

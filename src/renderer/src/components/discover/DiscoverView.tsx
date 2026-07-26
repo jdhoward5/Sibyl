@@ -10,7 +10,7 @@ const sorts: { key: SortKey; label: string }[] = [
   { key: 'likes', label: 'Most liked' }
 ]
 
-export function DiscoverView() {
+export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
   const { query, sort, results, loading, error } = useStore((s) => s.discover)
 
   // Initial load of trending models.
@@ -21,8 +21,8 @@ export function DiscoverView() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="border-b border-sibyl-border/60 px-8 py-5">
-        <div className="eyebrow mb-3 text-sibyl-accent">// Discover · Hugging Face</div>
+      <div className={`border-b border-sibyl-border/60 px-8 ${embedded ? 'py-4' : 'py-5'}`}>
+        {!embedded && <div className="eyebrow mb-3 text-sibyl-accent">Hugging Face</div>}
         <div className="flex items-center gap-3">
           <div className="relative flex-1">
             <SearchIcon size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-sibyl-muted" />

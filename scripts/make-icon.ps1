@@ -1,20 +1,24 @@
 # Generates a branded multi-resolution Sibyl app icon (build/icon.ico) using
 # GDI+ — no external image tooling required. The mark mirrors the in-app logo:
-# a 4-point "spark" on a violet→blue rounded-square gradient.
+# an arcane diamond sigil on a midnight rounded square.
 #
 # The .ico embeds PNG-compressed images at 16/32/48/64/128/256 px (Vista+),
 # rendered natively at each size for crispness.
 
+$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
+New-Item -ItemType Directory -Force -Path build | Out-Null
 
-$ACCENT1 = [System.Drawing.Color]::FromArgb(255, 0x8b, 0x7c, 0xff) # violet
-$ACCENT2 = [System.Drawing.Color]::FromArgb(255, 0x5b, 0x8d, 0xff) # blue
+$MIDNIGHT = [System.Drawing.Color]::FromArgb(255, 0x0e, 0x0c, 0x15)
+$VIOLET = [System.Drawing.Color]::FromArgb(255, 0x9a, 0x76, 0xe6)
+$MOONLIGHT = [System.Drawing.Color]::FromArgb(255, 0xc7, 0xb0, 0xf4)
 
 # Spark control points in a 24x24 viewBox (matches SparkIcon path), bbox center (12,10).
 $SPARK = @(
   @(12.0, 3.0), @(13.9, 8.2), @(19.0, 10.0), @(13.9, 11.8),
   @(12.0, 17.0), @(10.1, 11.8), @(5.0, 10.0), @(10.1, 8.2)
 )
+$DIAMOND = @(@(12.0, 2.75), @(21.25, 12.0), @(12.0, 21.25), @(2.75, 12.0))
 
 function New-RoundedPath([System.Drawing.RectangleF]$r, [float]$radius) {
   $p = New-Object System.Drawing.Drawing2D.GraphicsPath
@@ -35,56 +39,44 @@ function New-IconPng([int]$S) {
   $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
   $g.Clear([System.Drawing.Color]::Transparent)
 
-  # Rounded-square background with a diagonal gradient.
+  # Rounded-square midnight field.
   $margin = [float]([math]::Max(0.5, $S * 0.055))
   $rect = New-Object System.Drawing.RectangleF($margin, $margin, ($S - 2 * $margin), ($S - 2 * $margin))
   $radius = [float]($S * 0.225)
   $bgPath = New-RoundedPath $rect $radius
-  $grad = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect, $ACCENT1, $ACCENT2, 50.0)
-  $g.FillPath($grad, $bgPath)
-
-  # Soft top sheen for a glassy feel (clipped to the rounded square).
-  $g.SetClip($bgPath)
-  $sheenRect = New-Object System.Drawing.RectangleF($rect.X, $rect.Y, $rect.Width, $rect.Height * 0.55)
-  $sheen = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-    $sheenRect,
-    [System.Drawing.Color]::FromArgb(46, 255, 255, 255),
-    [System.Drawing.Color]::FromArgb(0, 255, 255, 255),
-    90.0)
-  $g.FillRectangle($sheen, $sheenRect)
-  $g.ResetClip()
+  $field = New-Object System.Drawing.SolidBrush($MIDNIGHT)
+  $g.FillPath($field, $bgPath)
+  $framePen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(150, $VIOLET), [float]([math]::Max(1.0, $S * 0.014)))
+  $g.DrawPath($framePen, $bgPath)
 
   # Helper to map a 24-box point to icon space, scaled around spark center (12,10).
-  $scale = [float]($S * 0.052)  # tuned so the spark fills ~62% of the icon
   $cx = $S / 2.0; $cy = $S / 2.0
-  function MapPts($pts, $sc, $ccx, $ccy) {
+  function MapPts($pts, $sc, $ccx, $ccy, [float]$sourceCy = 10.0) {
     $out = New-Object 'System.Drawing.PointF[]' ($pts.Count)
     for ($i = 0; $i -lt $pts.Count; $i++) {
       $x = $ccx + ($pts[$i][0] - 12.0) * $sc
-      $y = $ccy + ($pts[$i][1] - 10.0) * $sc
+      $y = $ccy + ($pts[$i][1] - $sourceCy) * $sc
       $out[$i] = New-Object System.Drawing.PointF($x, $y)
     }
     return $out
   }
 
-  # Drop shadow (subtle, only at larger sizes).
-  if ($S -ge 48) {
-    $shadowPts = MapPts $SPARK $scale ($cx) ($cy + $S * 0.018)
-    $shadow = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(60, 20, 16, 60))
-    $g.FillPolygon($shadow, $shadowPts)
-  }
+  # Fine diamond aperture around the central four-point star.
+  $diamondScale = [float]($S * 0.033)
+  [System.Drawing.PointF[]]$diamondPts = MapPts $DIAMOND $diamondScale $cx $cy 12.0
+  $diamondPen = New-Object System.Drawing.Pen($VIOLET, [float]([math]::Max(1.0, $S * 0.018)))
+  $g.DrawPolygon($diamondPen, $diamondPts)
 
-  # Main spark (crisp white).
-  $sparkPts = MapPts $SPARK $scale $cx $cy
-  $white = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 255, 255, 255))
-  $g.FillPolygon($white, $sparkPts)
+  $sparkPts = MapPts $SPARK ([float]($S * 0.041)) $cx $cy
+  $moonBrush = New-Object System.Drawing.SolidBrush($MOONLIGHT)
+  $g.FillPolygon($moonBrush, $sparkPts)
 
-  # Small accent sparkle, upper-right, for a touch of magic (skip on tiny sizes).
   if ($S -ge 32) {
-    $accentScale = $scale * 0.32
-    $accentPts = MapPts $SPARK $accentScale ($cx + $S * 0.205) ($cy - $S * 0.165)
-    $accentBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(235, 255, 255, 255))
-    $g.FillPolygon($accentBrush, $accentPts)
+    $nodeBrush = New-Object System.Drawing.SolidBrush($VIOLET)
+    $nodeSize = [float]([math]::Max(2.0, $S * 0.035))
+    foreach ($point in $diamondPts) {
+      $g.FillEllipse($nodeBrush, $point.X - $nodeSize / 2, $point.Y - $nodeSize / 2, $nodeSize, $nodeSize)
+    }
   }
 
   $g.Dispose()
@@ -101,6 +93,11 @@ foreach ($s in $sizes) {
   $pngs.Add($data)
   Write-Host ("  {0,3}px -> {1,7:N0} bytes" -f $s, $data.Length)
 }
+
+[byte[]]$master = New-IconPng 1024
+[System.IO.File]::WriteAllBytes(
+  (Join-Path (Get-Location) 'build\icon.png'),
+  $master)
 
 # Assemble the .ico container.
 $out = New-Object System.IO.MemoryStream
@@ -129,7 +126,50 @@ for ($i = 0; $i -lt $sizes.Count; $i++) {
 }
 $bw.Flush()
 
-New-Item -ItemType Directory -Force -Path build | Out-Null
 [System.IO.File]::WriteAllBytes((Join-Path (Get-Location) 'build\icon.ico'), $out.ToArray())
 
-Write-Host ("Wrote build/icon.ico ({0} sizes, {1:N0} bytes total)" -f $sizes.Count, $out.Length)
+function Write-BigEndianUInt32 {
+  param(
+    [System.IO.BinaryWriter]$Writer,
+    [uint32]$Value
+  )
+
+  $Writer.Write([byte](($Value -shr 24) -band 0xFF))
+  $Writer.Write([byte](($Value -shr 16) -band 0xFF))
+  $Writer.Write([byte](($Value -shr 8) -band 0xFF))
+  $Writer.Write([byte]($Value -band 0xFF))
+}
+
+# Modern ICNS files can embed PNG payloads directly. Writing the container here
+# keeps the checked-in macOS icon in lockstep with the Windows mark, even when a
+# branding update is made from Windows.
+$icnsEntries = @(
+  @{ Type = 'icp4'; Data = [byte[]](New-IconPng 16) }
+  @{ Type = 'icp5'; Data = [byte[]](New-IconPng 32) }
+  @{ Type = 'icp6'; Data = [byte[]](New-IconPng 64) }
+  @{ Type = 'ic07'; Data = [byte[]](New-IconPng 128) }
+  @{ Type = 'ic08'; Data = [byte[]](New-IconPng 256) }
+  @{ Type = 'ic09'; Data = [byte[]](New-IconPng 512) }
+  @{ Type = 'ic10'; Data = $master }
+)
+
+[uint32]$icnsLength = 8
+foreach ($entry in $icnsEntries) {
+  $icnsLength += 8 + $entry.Data.Length
+}
+
+$icnsStream = New-Object System.IO.MemoryStream
+$icnsWriter = New-Object System.IO.BinaryWriter($icnsStream)
+$icnsWriter.Write([System.Text.Encoding]::ASCII.GetBytes('icns'))
+Write-BigEndianUInt32 -Writer $icnsWriter -Value $icnsLength
+foreach ($entry in $icnsEntries) {
+  $icnsWriter.Write([System.Text.Encoding]::ASCII.GetBytes($entry.Type))
+  Write-BigEndianUInt32 -Writer $icnsWriter -Value (8 + $entry.Data.Length)
+  $icnsWriter.Write($entry.Data, 0, $entry.Data.Length)
+}
+
+[System.IO.File]::WriteAllBytes((Join-Path (Get-Location) 'build\icon.icns'), $icnsStream.ToArray())
+$icnsWriter.Dispose()
+$icnsStream.Dispose()
+
+Write-Host ("Wrote build/icon.ico, build/icon.icns, and build/icon.png ({0} ICO sizes)" -f $sizes.Count)

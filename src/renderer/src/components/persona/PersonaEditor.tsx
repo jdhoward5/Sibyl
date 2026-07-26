@@ -146,16 +146,16 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
         {/* header */}
         <div className="flex items-center justify-between gap-3 border-b border-sibyl-border/60 px-5 py-4">
           <div>
-            <div className="eyebrow text-sibyl-accent">// Persona</div>
-            <h2 id="persona-editor-title" className="mt-1 font-mono text-[18px] font-bold text-sibyl-text">
-              {isSaved ? 'Edit persona' : 'New persona'}
+            <div className="eyebrow text-sibyl-accent">Character</div>
+            <h2 id="persona-editor-title" className="display-title mt-1 text-[19px]">
+              {isSaved ? 'Edit character' : 'New character'}
             </h2>
           </div>
           <button
             data-dialog-initial-focus
             onClick={onClose}
             className="btn-ghost h-8 w-8 p-0"
-            aria-label="Close persona editor"
+            aria-label="Close character editor"
           >
             <XIcon size={16} />
           </button>
@@ -177,7 +177,7 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
             ))}
             <button
               onClick={() => loadPersona(null)}
-              title="New persona"
+              title="New character"
               className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-full border border-dashed border-sibyl-border text-sibyl-muted hover:text-sibyl-text"
             >
               <PlusIcon size={14} />
@@ -192,7 +192,7 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
               <Avatar avatar={draft.avatar} size={52} />
               <div className="flex-1">
                 <div className="eyebrow mb-1.5 text-[10.5px]">Name</div>
-                <input value={draft.name} onChange={(e) => setName(e.target.value)} className="input" placeholder="Persona name" />
+                <input value={draft.name} onChange={(e) => setName(e.target.value)} className="input" placeholder="Character name" />
               </div>
             </div>
 
@@ -282,7 +282,7 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
                           onChange={(e) => update({ personaId: e.target.value })}
                           className="input h-8 flex-1 py-0 text-[12px]"
                         >
-                          <option value="">Choose persona…</option>
+                          <option value="">Choose character…</option>
                           {personas.filter((persona) => persona.id !== draft.id).map((persona) => (
                             <option key={persona.id} value={persona.id}>{persona.name}</option>
                           ))}
@@ -408,7 +408,7 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
                 value={draft.greeting ?? ''}
                 onChange={(e) => set({ greeting: e.target.value })}
                 rows={2}
-                placeholder="Optional — seeds the first in-character message of a new thread."
+                placeholder="Optional — opens each new conversation in character."
                 className="input resize-none text-[13px] leading-[1.55]"
               />
             </div>
@@ -465,7 +465,7 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
                   onChange={(e) => setReplacementId(e.target.value)}
                   className="input mb-2 h-8 py-0 text-[12px]"
                 >
-                  <option value="">Replacement persona…</option>
+                  <option value="">Replacement character…</option>
                   {personas.filter((persona) => persona.id !== draft.id).map((persona) => (
                     <option key={persona.id} value={persona.id}>{persona.name}</option>
                   ))}

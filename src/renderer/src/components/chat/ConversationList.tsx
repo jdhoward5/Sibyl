@@ -49,29 +49,29 @@ export function ConversationList() {
           onClick={() => actions.openPersonaPicker()}
           className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-sibyl-accent/35 bg-sibyl-accent/[0.07] text-[13px] font-semibold text-sibyl-accent transition-colors hover:bg-sibyl-accent/15"
         >
-          <PlusIcon size={15} /> New thread
+          <PlusIcon size={15} /> New conversation
         </button>
         <div className="relative">
           <SearchIcon size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sibyl-muted" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search threads…"
+            placeholder="Search conversations…"
             className="input h-8 w-full pl-8 text-[12.5px]"
           />
         </div>
       </div>
-      <div className="px-4 pb-2 pt-1 eyebrow">// Threads</div>
+      <div className="eyebrow px-4 pb-2 pt-1">Conversations</div>
       <div
         role="list"
-        aria-label="Threads"
+        aria-label="Conversations"
         className="flex-1 overflow-y-auto px-2.5 pb-2"
       >
         {conversations.length === 0 && (
-          <p className="px-3 py-6 text-center text-[12px] text-sibyl-muted/70">No threads yet.</p>
+          <p className="px-3 py-6 text-center text-[12px] text-sibyl-muted/70">No conversations yet.</p>
         )}
         {conversations.length > 0 && filtered.length === 0 && (
-          <p className="px-3 py-6 text-center text-[12px] text-sibyl-muted/70">No threads match “{query.trim()}”.</p>
+          <p className="px-3 py-6 text-center text-[12px] text-sibyl-muted/70">No conversations match “{query.trim()}”.</p>
         )}
         {filtered.map((c) => {
           const titleMatches = q ? c.title.toLowerCase().includes(q) : true

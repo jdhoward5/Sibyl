@@ -62,20 +62,20 @@ export function PersonaPicker({ canCancel }: { canCancel: boolean }) {
       }}
     >
       <div className="mx-auto max-w-[760px] px-8 pb-12 pt-14">
-        <div className="eyebrow mb-2.5 text-sibyl-accent">// New conversation</div>
-        <h2 className="mb-4 font-mono text-[28px] font-extrabold tracking-tight text-sibyl-text">
-          {mode === 'scene' ? 'Cast a scene' : 'Who are you writing with?'}
+        <div className="eyebrow mb-2.5 text-sibyl-accent">New conversation</div>
+        <h2 className="display-title mb-4 text-[30px]">
+          {mode === 'scene' ? 'Cast an ensemble scene' : 'Who enters the studio?'}
         </h2>
 
         <div className="mb-6 inline-flex items-center gap-1 rounded-xl border border-sibyl-border bg-sibyl-surface p-1">
-          <Tab value="thread" icon={<ChatIcon size={15} />} label="Solo thread" />
-          <Tab value="scene" icon={<UsersIcon size={15} />} label="Scene (cast)" />
+          <Tab value="thread" icon={<ChatIcon size={15} />} label="One character" />
+          <Tab value="scene" icon={<UsersIcon size={15} />} label="Ensemble scene" />
         </div>
 
         <p className="mb-7 text-[14.5px] leading-relaxed text-sibyl-muted">
           {mode === 'scene'
             ? 'Pick two or more characters. They’ll converse with each other — watch it play out, jump in as your own character, or step in to direct.'
-            : 'Pick a saved persona — it sets the character brief, voice and sampling — or start blank.'}
+            : 'Choose a character and begin a private conversation, or open a blank page.'}
         </p>
 
         {mode === 'scene' && (
@@ -134,8 +134,8 @@ export function PersonaPicker({ canCancel }: { canCancel: boolean }) {
                 <PlusIcon size={18} />
               </div>
               <div>
-                <div className="font-mono text-[14px] font-bold text-sibyl-text">Blank thread</div>
-                <div className="text-[12px] text-sibyl-muted">No persona · global prompt</div>
+                <div className="text-[14px] font-semibold text-sibyl-text">Blank conversation</div>
+                <div className="text-[12px] text-sibyl-muted">No character · global brief</div>
               </div>
             </button>
           )}
@@ -149,8 +149,8 @@ export function PersonaPicker({ canCancel }: { canCancel: boolean }) {
               <PlusIcon size={18} />
             </div>
             <div>
-              <div className="font-mono text-[14px] font-bold text-sibyl-accent">New persona</div>
-              <div className="text-[12px] text-sibyl-muted">Build one from scratch</div>
+              <div className="text-[14px] font-semibold text-sibyl-accent">New character</div>
+              <div className="text-[12px] text-sibyl-muted">Shape one from scratch</div>
             </div>
           </button>
         </div>
@@ -184,7 +184,7 @@ export function PersonaPicker({ canCancel }: { canCancel: boolean }) {
               onClick={() => startThread(selected === undefined ? null : selected)}
               className="btn-primary h-[42px] px-5 text-[14px]"
             >
-              {chosen ? `Start with ${chosen.name}` : 'Start blank thread'}
+              {chosen ? `Begin with ${chosen.name}` : 'Begin blank conversation'}
               <ChevronRight size={16} />
             </button>
           )}

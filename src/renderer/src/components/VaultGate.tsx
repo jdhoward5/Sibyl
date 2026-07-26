@@ -1,6 +1,7 @@
 import { useState, type FormEvent, type KeyboardEvent } from 'react'
 import type { PrivateVaultStatus } from '@shared/types'
 import { actions } from '../store'
+import { SibylSigilIcon } from '../lib/icons'
 
 interface Props {
   status: PrivateVaultStatus
@@ -53,8 +54,8 @@ export function VaultGate({ status }: Props) {
         className="w-full max-w-md rounded-2xl border border-sibyl-border bg-sibyl-surface p-7 shadow-2xl"
       >
         <div className="mb-6">
-          <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-sibyl-accent/15 text-xl text-sibyl-accent">
-            ◆
+          <div className="sigil-frame mb-4 h-12 w-12">
+            <SibylSigilIcon size={27} />
           </div>
           <h1 className="text-xl font-semibold text-sibyl-text">
             {creating ? 'Protect your private data' : 'Unlock Sibyl'}
@@ -62,8 +63,8 @@ export function VaultGate({ status }: Props) {
           <p className="mt-2 text-[13px] leading-relaxed text-sibyl-muted">
             {creating
               ? status.migrationRequired
-                ? 'Your existing personas and conversations will be moved into an encrypted vault. The passphrase is required to recover them on another device.'
-                : 'Sibyl stores personas and conversations in an encrypted vault. This passphrase recovers the vault after hardware or operating-system changes.'
+                ? 'Your existing characters and conversations will be moved into an encrypted vault. The passphrase is required to recover them on another device.'
+                : 'Sibyl stores characters and conversations in an encrypted vault. This passphrase recovers the vault after hardware or operating-system changes.'
               : 'Enter the recovery passphrase for this encrypted vault.'}
           </p>
         </div>

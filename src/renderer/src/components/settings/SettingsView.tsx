@@ -1,12 +1,9 @@
 import { useState } from 'react'
 import { actions, uid, useStore } from '../../store'
 import type { GenerationProfile, RendererSettings, RendererSettingsPatch } from '@shared/types'
-import { ACCENT_THEMES } from '@shared/themes'
 import { TTS_VOICE_CATALOG } from '@shared/tts'
 import { formatBytes } from '@shared/format'
 import { Section, Slider, Toggle } from '../common/controls'
-import { Avatar } from '../persona/Avatar'
-import { PersonaEditor } from '../persona/PersonaEditor'
 import {
   PortableExportDialog,
   PortableImportDialog
@@ -21,42 +18,6 @@ import {
   StopIcon,
   XIcon
 } from '../../lib/icons'
-
-/** Manage the persona library — the reusable characters you write with. */
-function PersonasSection({ settings }: { settings: RendererSettings }) {
-  const personas = settings.personas
-  const [editor, setEditor] = useState<{ id: string | null } | null>(null)
-  return (
-    <Section title="Personas" desc="Reusable characters: a name, a character brief, an opening line and sampling. Pick one when starting a thread.">
-      {personas.length === 0 && <p className="text-[12.5px] text-sibyl-muted">No personas yet.</p>}
-      {personas.map((p) => (
-        <div key={p.id} className="flex items-center gap-3 rounded-lg border border-sibyl-border/60 px-3 py-2">
-          <Avatar avatar={p.avatar} size={34} glow={false} />
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-[13px] font-medium text-sibyl-text">{p.name}</div>
-            <div className="truncate text-[11px] text-sibyl-muted" title={p.brief}>
-              {p.role || p.brief || 'No brief'}
-            </div>
-          </div>
-          <button onClick={() => setEditor({ id: p.id })} className="btn-ghost shrink-0 px-2 py-1 text-[12px]" title="Edit">
-            <EditIcon size={13} />
-          </button>
-          <button
-            onClick={() => setEditor({ id: p.id })}
-            className="btn-ghost shrink-0 px-2 py-1 text-[12px] hover:text-red-300"
-            title="Review deletion impact"
-          >
-            <TrashIcon size={13} />
-          </button>
-        </div>
-      ))}
-      <button onClick={() => setEditor({ id: null })} className="btn-surface w-full justify-center">
-        <PlusIcon size={15} /> New persona
-      </button>
-      {editor && <PersonaEditor initialPersonaId={editor.id} onClose={() => setEditor(null)} />}
-    </Section>
-  )
-}
 
 /** Manage reusable generation-parameter profiles; apply one to the global params. */
 function GenerationProfilesSection({ settings }: { settings: RendererSettings }) {
@@ -409,6 +370,23 @@ function UpdatesSection() {
   )
 }
 
+type SettingsCategory =
+  | 'models'
+  | 'generation'
+  | 'voice'
+  | 'privacy'
+  | 'appearance'
+  | 'system'
+
+const SETTINGS_CATEGORIES: { key: SettingsCategory; label: string; desc: string }[] = [
+  { key: 'models', label: 'Models', desc: 'Loading and access' },
+  { key: 'generation', label: 'Generation', desc: 'Context and sampling' },
+  { key: 'voice', label: 'Voice', desc: 'On-device speech' },
+  { key: 'privacy', label: 'Privacy & data', desc: 'Vault and portability' },
+  { key: 'appearance', label: 'Appearance', desc: 'Reading and motion' },
+  { key: 'system', label: 'System', desc: 'Storage and updates' }
+]
+
 export function SettingsView() {
   const settings = useStore((s) => s.settings)
   const vault = useStore((s) => s.vault)
@@ -425,6 +403,7 @@ export function SettingsView() {
   const [passkeyWorking, setPasskeyWorking] = useState(false)
   const [portableExportOpen, setPortableExportOpen] = useState(false)
   const [portableImportOpen, setPortableImportOpen] = useState(false)
+  const [category, setCategory] = useState<SettingsCategory>('models')
 
   if (!settings) return null
 
@@ -450,11 +429,37 @@ export function SettingsView() {
       ]
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-[720px] px-8 py-7">
-        <div className="eyebrow mb-2 text-sibyl-accent">// Settings</div>
-        <h1 className="mb-6 font-mono text-[24px] font-extrabold text-sibyl-text">Preferences</h1>
-        <div className="flex flex-col gap-4">
+    <div className="flex min-h-0 flex-1">
+      <aside className="w-[218px] shrink-0 border-r border-sibyl-border/60 bg-sibyl-sunken px-3 py-5">
+        <div className="eyebrow mb-3 px-3 text-sibyl-accent">Settings</div>
+        <nav aria-label="Settings categories" className="flex flex-col gap-1">
+          {SETTINGS_CATEGORIES.map((item) => (
+            <button
+              key={item.key}
+              onClick={() => setCategory(item.key)}
+              aria-current={category === item.key ? 'page' : undefined}
+              className={`rounded-lg px-3 py-2.5 text-left transition-colors ${
+                category === item.key
+                  ? 'bg-sibyl-surface-2 text-sibyl-text'
+                  : 'text-sibyl-muted hover:bg-sibyl-surface hover:text-sibyl-text'
+              }`}
+            >
+              <span className="block text-[13px] font-medium">{item.label}</span>
+              <span className="mt-0.5 block text-[10.5px] text-sibyl-faint">{item.desc}</span>
+            </button>
+          ))}
+        </nav>
+      </aside>
+      <div className="flex-1 overflow-y-auto">
+        <div className="mx-auto max-w-[780px] px-8 py-7">
+          <div className="eyebrow mb-2 text-sibyl-accent">
+            {SETTINGS_CATEGORIES.find((item) => item.key === category)?.label}
+          </div>
+          <h1 className="display-title mb-6 text-[26px]">
+            {SETTINGS_CATEGORIES.find((item) => item.key === category)?.desc}
+          </h1>
+          <div className="flex flex-col gap-4">
+          <div className={category === 'models' ? 'contents' : 'hidden'}>
           <Section title="Inference backend" desc="How models are accelerated. Changes apply when you next load a model.">
             <div className="flex gap-2">
               {gpuOptions.map((o) => (
@@ -501,7 +506,7 @@ export function SettingsView() {
             <div>
               <label htmlFor="global-character-brief" className="mb-1.5 block text-[13px] text-sibyl-text">Character brief</label>
               <p className="mb-1.5 text-[12px] text-sibyl-muted">
-                The default system prompt for blank threads. Personas override this per thread.
+                The default brief for blank conversations. Characters override it per conversation.
               </p>
               <textarea
                 id="global-character-brief"
@@ -515,7 +520,9 @@ export function SettingsView() {
               />
             </div>
           </Section>
+          </div>
 
+          <div className={category === 'generation' ? 'contents' : 'hidden'}>
           <Section
             title="Context management"
             desc="How Sibyl keeps long chats inside the model's context window."
@@ -588,10 +595,14 @@ export function SettingsView() {
             </div>
           </Section>
 
-          <PersonasSection settings={settings} />
           <GenerationProfilesSection settings={settings} />
-          <VoiceSpeechSection settings={settings} />
+          </div>
 
+          <div className={category === 'voice' ? 'contents' : 'hidden'}>
+          <VoiceSpeechSection settings={settings} />
+          </div>
+
+          <div className={category === 'appearance' ? 'contents' : 'hidden'}>
           <Section
             title="Accessibility"
             desc="Reading, contrast, and motion preferences for the whole app."
@@ -633,7 +644,9 @@ export function SettingsView() {
               </select>
             </div>
           </Section>
+          </div>
 
+          <div className={category === 'models' ? 'contents' : 'hidden'}>
           <Section title="Downloads" desc="Integrity checks applied to models you download.">
             <Toggle
               label="Verify downloads with SHA-256"
@@ -704,11 +717,13 @@ export function SettingsView() {
               )}
             </div>
           </Section>
+          </div>
 
+          <div className={category === 'privacy' ? 'contents' : 'hidden'}>
           {vault?.state === 'unlocked' && (
             <Section
               title="Private data protection"
-              desc="Conversations, personas, prompts, and their metadata are encrypted at rest."
+              desc="Conversations, characters, prompts, and their metadata are encrypted at rest."
             >
                 <Toggle
                   label="Unlock seamlessly on this device"
@@ -934,51 +949,9 @@ export function SettingsView() {
               </button>
             </div>
           </Section>
+          </div>
 
-          <Section title="Appearance" desc="Pick an accent palette — it recolors buttons, the assistant caret, your messages and the composer.">
-            <div className="flex gap-2">
-              {(['dark', 'light'] as const).map((t) => (
-                <button
-                  key={t}
-                  onClick={() => update({ theme: t })}
-                  className={`flex-1 rounded-lg border px-3 py-2 text-[13px] font-medium capitalize transition-colors ${
-                    settings.theme === t
-                      ? 'border-sibyl-accent/60 bg-sibyl-accent/15 text-sibyl-text'
-                      : 'border-sibyl-border text-sibyl-muted hover:text-sibyl-text'
-                  }`}
-                >
-                  {t}
-                </button>
-              ))}
-            </div>
-            <div>
-              <label className="mb-2 block text-[13px] text-sibyl-text">Accent theme</label>
-              <div className="flex flex-wrap gap-2">
-                {ACCENT_THEMES.map((t) => {
-                  const active = settings.accent === t.key
-                  return (
-                    <button
-                      key={t.key}
-                      onClick={() => update({ accent: t.key })}
-                      title={t.label}
-                      className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-[12.5px] font-medium transition-colors ${
-                        active
-                          ? 'border-sibyl-accent/60 bg-sibyl-accent/10 text-sibyl-text'
-                          : 'border-sibyl-border text-sibyl-muted hover:text-sibyl-text'
-                      }`}
-                    >
-                      <span className="flex gap-1">
-                        <span className="h-3 w-3 rounded-[3px]" style={{ background: t.accent }} />
-                        <span className="h-3 w-3 rounded-[3px]" style={{ background: t.accent2 }} />
-                      </span>
-                      {t.label}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          </Section>
-
+          <div className={category === 'system' ? 'contents' : 'hidden'}>
           <Section title="Storage">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
@@ -1031,6 +1004,8 @@ export function SettingsView() {
               are fetched directly from Hugging Face over TLS.
             </p>
           </Section>
+          </div>
+          </div>
         </div>
       </div>
       {portableExportOpen && (

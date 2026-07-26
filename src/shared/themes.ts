@@ -17,7 +17,7 @@ export interface AccentTheme {
 
 export const ACCENT_THEMES = [
   // Original Sibyl identity — deep indigo night with an arcane violet accent.
-  { key: 'arcane', label: 'Arcane', accent: '#8b7cff', accent2: '#5b8dff', glow: '#a78bfa' },
+  { key: 'arcane', label: 'Arcane', accent: '#9a76e6', accent2: '#b28be6', glow: '#c7b0f4' },
   { key: 'rose', label: 'Rose', accent: '#ffa3b8', accent2: '#a8b0ff', glow: '#ffc2d4' },
   { key: 'synth', label: 'Synthwave', accent: '#5ee7ff', accent2: '#ff66c4', glow: '#9beeff' },
   { key: 'phosphor', label: 'Phosphor', accent: '#7cf5a0', accent2: '#ffc266', glow: '#b3f8cb' },

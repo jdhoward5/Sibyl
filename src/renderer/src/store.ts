@@ -91,7 +91,7 @@ function applyAccentTheme(key: string | null | undefined): void {
   root.setProperty('--sibyl-glow', hexToRgbChannels(t.glow))
 }
 
-export type View = 'chat' | 'discover' | 'models' | 'settings'
+export type View = 'studio' | 'characters' | 'models' | 'settings'
 export type SortKey = 'trending' | 'downloads' | 'likes'
 
 export interface DiscoverState {
@@ -150,7 +150,7 @@ const initialState: AppState = {
   ready: false,
   vault: null,
   vaultBackups: [],
-  view: 'chat',
+  view: 'studio',
   settings: null,
   appInfo: null,
   engine: {
@@ -665,15 +665,15 @@ async function runTurn(
 
 export const actions = {
   setView(view: View): void {
-    if (view !== 'chat') abandonSceneRun()
-    // Leaving (or re-entering) a view dismisses the new-thread picker overlay.
+    if (view !== 'studio') abandonSceneRun()
+    // Leaving (or re-entering) a view dismisses the new-conversation picker overlay.
     setState({ view, personaPickerOpen: false })
   },
 
-  /** Show the new-thread persona picker over the chat column. */
+  /** Show the new-conversation character picker over the studio. */
   openPersonaPicker(): void {
     abandonSceneRun()
-    setState({ personaPickerOpen: true, view: 'chat' })
+    setState({ personaPickerOpen: true, view: 'studio' })
   },
   closePersonaPicker(): void {
     setState({ personaPickerOpen: false })
@@ -804,7 +804,6 @@ export const actions = {
     })
     ttsPlayer.setVolume(state.settings?.tts.volume ?? 1)
 
-    if (state.settings?.theme) document.documentElement.classList.toggle('light', state.settings.theme === 'light')
     applyAccentTheme(state.settings?.accent)
     applyAccessibilitySettings(state.settings?.accessibility)
 
@@ -1286,7 +1285,7 @@ export const actions = {
     }
     const conv: Conversation = {
       id: uid(),
-      title: 'New thread',
+      title: 'New conversation',
       modelId: state.engine.modelId,
       messages,
       personaId: persona?.id,
@@ -1302,7 +1301,7 @@ export const actions = {
       conversations: [migrated, ...s.conversations],
       activeConversationId: migrated.id,
       contextUsage: null,
-      view: 'chat',
+      view: 'studio',
       personaPickerOpen: false
     }))
     persist(migrated)
@@ -1343,7 +1342,7 @@ export const actions = {
       conversations: [migrated, ...s.conversations],
       activeConversationId: migrated.id,
       contextUsage: null,
-      view: 'chat',
+      view: 'studio',
       personaPickerOpen: false
     }))
     persist(migrated)
@@ -2011,7 +2010,7 @@ export const actions = {
         conversation.personaId === id || conversation.cast?.includes(id)
     )
     if (strategy === 'replace' && !replacement) {
-      toast('Choose a replacement persona first.', 'error')
+      toast('Choose a replacement character first.', 'error')
       return
     }
     if (
@@ -2218,7 +2217,7 @@ export const actions = {
     const persona = findPersona(state.settings?.personas, personaId)
     if (!override || !persona) return
     actions.savePersona({ ...persona, ...override, id: persona.id })
-    toast('Scene-specific character changes were promoted to the persona library.', 'success')
+    toast('Scene-specific character changes were promoted to the character library.', 'success')
   },
 
   async saveDirection(id: string, direction: SceneDirection): Promise<void> {
@@ -2328,7 +2327,7 @@ export const actions = {
     setState({
       activeConversationId: id,
       contextUsage: null,
-      view: 'chat',
+      view: 'studio',
       personaPickerOpen: false,
       scenePlay: leavingRun ? null : state.scenePlay
     })
@@ -2713,7 +2712,7 @@ export const actions = {
       conversations: [branch, ...s.conversations],
       activeConversationId: branch.id,
       contextUsage: null,
-      view: 'chat'
+      view: 'studio'
     }))
     persist(branch)
     void actions.refreshContextUsage()
@@ -2817,7 +2816,6 @@ export const actions = {
     })
     confirmedSettings = nextSettings
     if (nextSettings) {
-      document.documentElement.classList.toggle('light', nextSettings.theme === 'light')
       applyAccentTheme(nextSettings.accent)
       applyAccessibilitySettings(nextSettings.accessibility)
       ttsPlayer.setVolume(nextSettings.tts.volume)
@@ -2990,7 +2988,6 @@ export const actions = {
     if (res.ok && res.data) {
       confirmedSettings = res.data
       setState({ settings: res.data })
-      if (patch.theme) document.documentElement.classList.toggle('light', patch.theme === 'light')
       if (patch.accent) applyAccentTheme(patch.accent)
       if (patch.accessibility) applyAccessibilitySettings(res.data.accessibility)
       if (patch.tts?.volume !== undefined) ttsPlayer.setVolume(patch.tts.volume)

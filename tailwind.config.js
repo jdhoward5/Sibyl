@@ -8,17 +8,17 @@ export default {
         mono: ['JetBrains Mono Variable', 'JetBrains Mono', 'Cascadia Code', 'Consolas', 'monospace']
       },
       colors: {
-        // Sibyl palette — Eagle dark/OLED surfaces with a themeable accent.
+        // Sibyl palette — layered midnight surfaces with an arcane violet accent.
         sibyl: {
-          bg: '#000000', // void
-          surface: '#0a0a0b',
-          'surface-2': '#141416', // raised
-          sunken: '#050506',
-          border: '#23232a',
-          muted: '#9696a3',
-          faint: '#868692',
-          secondary: '#b8b8c0',
-          text: '#f5f5f7',
+          bg: '#07060b',
+          surface: '#0e0c15',
+          'surface-2': '#171321',
+          sunken: '#09070f',
+          border: '#2b2437',
+          muted: '#a098ad',
+          faint: '#82798f',
+          secondary: '#c8c0d2',
+          text: '#f5f1fa',
           // Accent trio is driven by CSS variables (set per accent theme) so a
           // theme switch repaints every `sibyl-accent` utility. Channels are
           // space-separated RGB so opacity modifiers (e.g. /20) keep working.

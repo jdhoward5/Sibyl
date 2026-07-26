@@ -1,24 +1,32 @@
 # Sibyl
 
-A beautiful, secure **desktop app** (Windows & macOS) for downloading chat/text
-models from **Hugging Face** and talking to them — entirely **on your own
-machine**. No cloud, no telemetry, no data leaving your computer.
+Sibyl is a private desktop studio for creating AI characters, writing one-on-one
+conversations, and casting ensemble scenes. Models, character voices, speech,
+and encrypted conversation history stay on your own Windows or macOS machine.
 
 ![Sibyl](docs/screenshot.png)
 
 ## Features
 
-- 🔮 **Discover & download** GGUF chat models straight from Hugging Face, with a
+- **Character studio** — create reusable characters with private motivations,
+  relationships, voices, opening lines, and individual generation settings.
+- **Ensemble scenes** — cast multiple characters, watch them converse, step
+  through individual beats, join as your own character, or direct the action.
+- **Encrypted private worlds** — conversations, characters, semantic metadata,
+  backups, and portable `.sibyl` bundles are authenticated ciphertext at rest.
+- **Local neural voices** — on-device Piper speech with per-character voices,
+  scene narration, and no audio leaving the machine.
+- **Browse & download** GGUF chat models straight from Hugging Face, with a
   curated view of quantizations (size vs. quality) and resumable downloads.
-- ⚡ **GPU-accelerated local inference** via [`node-llama-cpp`](https://node-llama-cpp.withcat.ai)
+- **GPU-accelerated local inference** via [`node-llama-cpp`](https://node-llama-cpp.withcat.ai)
   (llama.cpp). Streams tokens in real time. NVIDIA **CUDA** (incl. **Blackwell /
   RTX 50-series**) on Windows, Apple **Metal** on Apple-Silicon Macs.
-- 💬 **Polished chat** — markdown + code blocks with copy, multi-conversation
-  history, per-message token/throughput stats, stop-generation, system prompts.
-- 🎛️ **Full control** — temperature, top-p/k, min-p, repeat penalty, context
+- **Reading-first conversation UI** — markdown, branching, in-conversation
+  search, compaction, attribution, and per-message performance stats.
+- **Full control** — temperature, top-p/k, min-p, repeat penalty, context
   window, GPU layers, and inference backend (Auto/CUDA/Vulkan/CPU on Windows;
   Auto/Metal/CPU on macOS).
-- 🔒 **Secure by construction** — context isolation, no node integration in the
+- **Secure by construction** — context isolation, no node integration in the
   renderer, a narrow typed preload bridge, strict CSP, navigation guards, and
   the optional Hugging Face token encrypted at rest via the OS keychain.
 
@@ -37,7 +45,7 @@ machine**. No cloud, no telemetry, no data leaving your computer.
                                        │ contextBridge (preload/index.ts)
 ┌──────────────────────────────────────▼────── Renderer (React, isolated) ───┐
 │  store.ts       external store (useSyncExternalStore)                      │
-│  components/    Chat · Discover · Models · Settings                        │
+│  components/    Studio · Characters · Models · Settings                    │
 │  lib/markdown   safe (no innerHTML) markdown → React elements              │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -139,7 +147,7 @@ skipped, and conflicts abort without overwriting.
 - A strict Content-Security-Policy is applied both via response headers (main)
   and a `<meta>` tag. `connect-src` is limited to Hugging Face over TLS.
 - External links open in the system browser; in-app navigation is blocked.
-- Conversation/persona content and semantic metadata are stored only as
+- Conversation/character content and semantic metadata are stored only as
   authenticated encrypted vault records under Electron's `userData`; rotating
   backups and portable `.sibyl` bundles are encrypted too. Every vault has an
   Argon2id recovery passphrase, with optional seamless OS-protected device unlock,

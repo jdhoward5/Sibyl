@@ -1,5 +1,5 @@
 // Generates the macOS app icon (build/icon.icns + build/icon.png) from the same
-// "spark on a violet→blue rounded square" mark as the Windows make-icon.ps1, but
+// arcane diamond sigil on a midnight rounded square as the Windows make-icon.ps1, but
 // rendered as a vector (SVG) and rasterized natively at 1024px through an
 // offscreen Electron (Chromium) window — so the large Retina sizes are crisp
 // rather than upscaled from the 256px .ico. Then `iconutil` packs an .iconset
@@ -24,41 +24,27 @@ const SPARK = [
   [12.0, 3.0], [13.9, 8.2], [19.0, 10.0], [13.9, 11.8],
   [12.0, 17.0], [10.1, 11.8], [5.0, 10.0], [10.1, 8.2]
 ]
-const mapPts = (sc, ccx, ccy) =>
-  SPARK.map(([x, y]) => `${(ccx + (x - 12) * sc).toFixed(2)},${(ccy + (y - 10) * sc).toFixed(2)}`).join(' ')
+const DIAMOND = [[12, 2.75], [21.25, 12], [12, 21.25], [2.75, 12]]
+const mapPts = (points, sc, ccx, ccy, sourceCy = 10) =>
+  points.map(([x, y]) => `${(ccx + (x - 12) * sc).toFixed(2)},${(ccy + (y - sourceCy) * sc).toFixed(2)}`).join(' ')
 
 const margin = S * 0.055
 const side = S - 2 * margin
 const radius = S * 0.225
 const cx = S / 2
 const cy = S / 2
-const scale = S * 0.052
-
-// 50° diagonal gradient direction (cos50, sin50), matching the GDI brush angle.
-const gx = Math.cos((50 * Math.PI) / 180)
-const gy = Math.sin((50 * Math.PI) / 180)
+const scale = S * 0.041
+const diamondScale = S * 0.033
 
 const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${S}" height="${S}" viewBox="0 0 ${S} ${S}">
-  <defs>
-    <linearGradient id="bg" gradientUnits="objectBoundingBox" x1="0" y1="0" x2="${gx.toFixed(4)}" y2="${gy.toFixed(4)}">
-      <stop offset="0" stop-color="#8b7cff"/>
-      <stop offset="1" stop-color="#5b8dff"/>
-    </linearGradient>
-    <linearGradient id="sheen" gradientUnits="userSpaceOnUse" x1="0" y1="${margin}" x2="0" y2="${margin + side * 0.55}">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
-      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
-    </linearGradient>
-    <clipPath id="rr">
-      <rect x="${margin}" y="${margin}" width="${side}" height="${side}" rx="${radius}" ry="${radius}"/>
-    </clipPath>
-  </defs>
-  <rect x="${margin}" y="${margin}" width="${side}" height="${side}" rx="${radius}" ry="${radius}" fill="url(#bg)"/>
-  <g clip-path="url(#rr)">
-    <rect x="${margin}" y="${margin}" width="${side}" height="${side * 0.55}" fill="url(#sheen)"/>
-  </g>
-  <polygon points="${mapPts(scale, cx, cy + S * 0.018)}" fill="#14103c" fill-opacity="0.235"/>
-  <polygon points="${mapPts(scale, cx, cy)}" fill="#ffffff"/>
-  <polygon points="${mapPts(scale * 0.32, cx + S * 0.205, cy - S * 0.165)}" fill="#ffffff" fill-opacity="0.92"/>
+  <rect x="${margin}" y="${margin}" width="${side}" height="${side}" rx="${radius}" ry="${radius}" fill="#0e0c15" stroke="#9a76e6" stroke-opacity=".6" stroke-width="${S * 0.014}"/>
+  <polygon points="${mapPts(DIAMOND, diamondScale, cx, cy, 12)}" fill="none" stroke="#9a76e6" stroke-width="${S * 0.018}" stroke-linejoin="round"/>
+  <polygon points="${mapPts(SPARK, scale, cx, cy)}" fill="#c7b0f4"/>
+  ${DIAMOND.map(([x, y]) => {
+    const px = cx + (x - 12) * diamondScale
+    const py = cy + (y - 12) * diamondScale
+    return `<circle cx="${px}" cy="${py}" r="${S * 0.0175}" fill="#9a76e6"/>`
+  }).join('')}
 </svg>`
 
 const html = `<!doctype html><html><head><meta charset="utf-8"><style>

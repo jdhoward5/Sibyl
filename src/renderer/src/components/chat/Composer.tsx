@@ -64,12 +64,12 @@ export function Composer() {
   }
 
   const placeholder = !hasModel
-    ? 'Load a model to start…'
+    ? 'Choose a model to bring this conversation to life…'
     : scene
       ? mode === 'direct'
         ? 'Direct the scene — out-of-character guidance (e.g. “raise the tension”)…'
         : 'Speak as your character — the next character will respond…'
-      : 'Message Sibyl…  (Enter to send, Shift+Enter for newline)'
+      : 'Write a message…  (Enter to send, Shift+Enter for newline)'
 
   return (
     <div className="shrink-0 px-4 pb-4 pt-2">

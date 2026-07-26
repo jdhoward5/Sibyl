@@ -6,9 +6,9 @@
   color-scheme: dark;
   /* Accent trio (RGB channels) — baseline = the "Arcane" theme. The renderer
      overrides these on documentElement when another accent theme is selected. */
-  --sibyl-accent: 139 124 255;
-  --sibyl-accent-2: 91 141 255;
-  --sibyl-glow: 167 139 250;
+  --sibyl-accent: 154 118 230;
+  --sibyl-accent-2: 178 139 230;
+  --sibyl-glow: 199 176 244;
 }
 
 * {
@@ -109,13 +109,13 @@ html.reduce-motion *::after {
 /* ---- Reusable component classes ----------------------------------------- */
 @layer components {
   .card {
-    @apply rounded-xl border border-sibyl-border bg-sibyl-surface;
+    @apply rounded-xl border border-sibyl-border/80 bg-sibyl-surface;
   }
   .btn {
     @apply no-drag inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-40;
   }
   .btn-primary {
-    @apply btn bg-gradient-to-br from-sibyl-accent to-sibyl-accent-2 text-[#0a0a0b] font-semibold shadow-lg shadow-sibyl-accent/30 hover:brightness-110 active:brightness-95;
+    @apply btn bg-sibyl-accent font-semibold text-[#100b18] shadow-[0_10px_24px_-16px] shadow-sibyl-accent/80 hover:bg-sibyl-glow active:bg-sibyl-accent-2;
   }
   /* Eyebrow: the small mono uppercase section labels used across the UI. */
   .eyebrow {
@@ -125,13 +125,31 @@ html.reduce-motion *::after {
     @apply btn text-sibyl-muted hover:bg-sibyl-surface-2 hover:text-sibyl-text;
   }
   .btn-surface {
-    @apply btn border border-sibyl-border bg-sibyl-surface-2 text-sibyl-text hover:border-sibyl-accent/50;
+    @apply btn border border-sibyl-border bg-sibyl-surface text-sibyl-text hover:border-sibyl-accent/50 hover:bg-sibyl-surface-2;
   }
   .input {
     @apply no-drag w-full rounded-lg border border-sibyl-border bg-sibyl-bg px-3 py-2 text-sm text-sibyl-text placeholder:text-sibyl-muted/60 outline-none transition focus:border-sibyl-accent/70 focus:ring-2 focus:ring-sibyl-accent/20;
   }
   .chip {
-    @apply inline-flex items-center gap-1 rounded-md bg-sibyl-surface-2 px-2 py-0.5 text-[11px] font-medium text-sibyl-muted;
+    @apply inline-flex items-center gap-1 rounded-md border border-sibyl-border/70 bg-sibyl-surface-2/70 px-2 py-0.5 text-[10.5px] font-medium text-sibyl-muted;
+  }
+  .display-title {
+    @apply font-semibold tracking-[-0.025em] text-sibyl-text;
+  }
+  .sigil-frame {
+    @apply flex shrink-0 items-center justify-center rounded-lg border border-sibyl-accent/35 bg-sibyl-accent/10 text-sibyl-glow;
+  }
+  .empty-stage {
+    @apply flex min-h-[360px] flex-col items-center justify-center rounded-2xl border border-dashed border-sibyl-border/80 bg-sibyl-surface/35 px-8 text-center;
+  }
+  .segmented-control {
+    @apply inline-flex items-center gap-0.5 rounded-lg border border-sibyl-border bg-sibyl-sunken p-1;
+  }
+  .segmented-control button {
+    @apply rounded-md px-3 py-1.5 text-[12px] font-medium text-sibyl-muted transition-colors hover:text-sibyl-text;
+  }
+  .segmented-control button.is-active {
+    @apply bg-sibyl-surface-2 text-sibyl-text;
   }
 }
 
@@ -139,7 +157,7 @@ html.reduce-motion *::after {
 .skeleton {
   position: relative;
   overflow: hidden;
-  background: #1b1d2b;
+  background: #181422;
 }
 .skeleton::after {
   content: '';
@@ -161,7 +179,7 @@ html.reduce-motion *::after {
   appearance: none;
   height: 5px;
   border-radius: 9999px;
-  background: #262a3d;
+  background: #2a2338;
   outline: none;
 }
 .sibyl-range::-webkit-slider-thumb {
@@ -170,9 +188,9 @@ html.reduce-motion *::after {
   width: 16px;
   height: 16px;
   border-radius: 9999px;
-  background: linear-gradient(135deg, rgb(var(--sibyl-accent)), rgb(var(--sibyl-accent-2)));
+  background: rgb(var(--sibyl-accent));
   cursor: pointer;
-  box-shadow: 0 0 0 4px rgb(var(--sibyl-accent) / 0.15);
+  box-shadow: 0 0 0 4px rgb(var(--sibyl-accent) / 0.14);
   transition: box-shadow 0.15s;
 }
 .sibyl-range::-webkit-slider-thumb:hover {

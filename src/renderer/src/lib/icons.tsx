@@ -134,6 +134,16 @@ export const SparkIcon = (p: IconProps) => (
     <path d="M12 3l1.9 5.2L19 10l-5.1 1.8L12 17l-1.9-5.2L5 10l5.1-1.8z" />
   </Icon>
 )
+export const SibylSigilIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M12 2.75 20.25 12 12 21.25 3.75 12 12 2.75Z" />
+    <path d="m12 6.6 1.35 4.05L17.4 12l-4.05 1.35L12 17.4l-1.35-4.05L6.6 12l4.05-1.35L12 6.6Z" />
+    <circle cx="12" cy="2.75" r=".7" fill="currentColor" stroke="none" />
+    <circle cx="20.25" cy="12" r=".7" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="21.25" r=".7" fill="currentColor" stroke="none" />
+    <circle cx="3.75" cy="12" r=".7" fill="currentColor" stroke="none" />
+  </Icon>
+)
 export const EditIcon = (p: IconProps) => (
   <Icon {...p}>
     <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />

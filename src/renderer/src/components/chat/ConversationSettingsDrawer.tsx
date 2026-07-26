@@ -16,7 +16,7 @@ interface Props {
 /**
  * Right-side drawer for per-conversation overrides (system prompt + generation
  * params) plus export. Seeded from the conversation's current overrides on mount;
- * ChatView keys it by conversation id so switching chats remounts it.
+ * ChatView keys it by conversation id so switching conversations remounts it.
  */
 export function ConversationSettingsDrawer({ conversation, onClose }: Props) {
   const dialogRef = useDialogFocus<HTMLDivElement>(onClose)
@@ -79,13 +79,13 @@ export function ConversationSettingsDrawer({ conversation, onClose }: Props) {
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="thread-settings-title"
+        aria-labelledby="conversation-settings-title"
         tabIndex={-1}
         className="relative flex h-full w-full max-w-md animate-fade-in flex-col border-l border-sibyl-border bg-sibyl-surface shadow-2xl"
       >
         <div className="flex items-center justify-between gap-3 border-b border-sibyl-border/60 p-5">
           <div className="min-w-0">
-            <h2 id="thread-settings-title" className="text-lg font-semibold text-sibyl-text">Thread settings</h2>
+            <h2 id="conversation-settings-title" className="text-lg font-semibold text-sibyl-text">Conversation settings</h2>
             <p className="truncate text-[12.5px] text-sibyl-muted" title={conversation.title}>
               {conversation.title}
             </p>
@@ -94,7 +94,7 @@ export function ConversationSettingsDrawer({ conversation, onClose }: Props) {
             data-dialog-initial-focus
             onClick={onClose}
             className="btn-ghost h-8 w-8 p-0"
-            aria-label="Close thread settings"
+            aria-label="Close conversation settings"
           >
             <XIcon size={16} />
           </button>
@@ -117,7 +117,7 @@ export function ConversationSettingsDrawer({ conversation, onClose }: Props) {
                     }}
                     className="input h-7 w-auto px-2 py-0 text-[12px]"
                   >
-                    <option value="">Copy from persona…</option>
+                    <option value="">Copy from character…</option>
                     {settings.personas.map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.name}
@@ -135,7 +135,7 @@ export function ConversationSettingsDrawer({ conversation, onClose }: Props) {
                   scene
                     ? 'Optional direction applied to every character and every beat in this scene.'
                     : conversation.personaId
-                    ? 'Leave empty to use this thread’s persona brief.'
+                    ? 'Leave empty to use this conversation’s character brief.'
                     : `Leave empty to use the global character brief:\n${settings.load.systemPrompt}`
                 }
                 className="input resize-none text-[13px]"

@@ -144,11 +144,25 @@ async function run() {
     await page.getByRole('button', { name: 'Create encrypted vault' }).click()
 
     // Ready when the conversation list has rendered.
-    await page.getByText('New thread').waitFor({ timeout: 30000 })
+    await page.getByText('New conversation').waitFor({ timeout: 30000 })
     await page.getByText('Alpha chat about pelicans').first().waitFor({ timeout: 30000 })
     await shot('01-boot.png')
     log('app booted with seeded conversations')
     await assertAccessible('Chat')
+    await page.getByRole('button', { name: 'Characters', exact: true }).click()
+    await page.getByText('Character library', { exact: true }).waitFor()
+    await shot('01-characters.png')
+    await assertAccessible('Characters')
+    await page.getByRole('button', { name: 'Models', exact: true }).click()
+    await page.getByText('On this machine', { exact: true }).waitFor()
+    await assertAccessible('Installed models')
+    await page.getByRole('button', { name: 'Browse', exact: true }).click()
+    await page.getByText('Browse models', { exact: true }).waitFor()
+    await page.getByPlaceholder('Search models — e.g. roleplay, Llama, Qwen…').waitFor()
+    await shot('01-models.png')
+    await assertAccessible('Model browser')
+    await page.getByRole('button', { name: 'Studio', exact: true }).click()
+    await page.getByText('Alpha chat about pelicans', { exact: true }).first().waitFor()
     assert(!fs.existsSync(path.join(userDataDir, 'settings.json')), 'legacy plaintext settings removed')
     assert(!fs.existsSync(path.join(userDataDir, 'conversations')), 'legacy plaintext conversations removed')
     const plaintextOffenders = []
@@ -172,12 +186,12 @@ async function run() {
     )
 
     // --- Sidebar search ------------------------------------------------------
-    await page.getByPlaceholder('Search threads').fill('pelican')
+    await page.getByPlaceholder('Search conversations').fill('pelican')
     await page.waitForTimeout(150)
     assert((await page.getByText('Beta chat about France').count()) === 0, 'search hides non-matching conversation')
     assert((await page.getByText('Alpha chat about pelicans').count()) >= 1, 'search keeps matching conversation')
     await shot('02-search.png')
-    await page.getByPlaceholder('Search threads').fill('')
+    await page.getByPlaceholder('Search conversations').fill('')
     await page.waitForTimeout(100)
 
     // --- In-chat find (Alpha is the active conversation) ---------------------
@@ -209,11 +223,11 @@ async function run() {
     await composer.fill('')
     await page.waitForTimeout(50)
 
-    // --- Thread settings drawer: export + overrides --------------------------
-    // Thread settings also lives in the "⋯" overflow menu now.
+    // --- Conversation settings drawer: export + overrides -------------------
+    // Conversation settings lives in the "⋯" overflow menu.
     await page.getByTitle('More').click()
-    await page.getByText('Thread settings & export', { exact: true }).click()
-    await page.getByText('Thread settings', { exact: true }).waitFor({ timeout: 5000 })
+    await page.getByText('Conversation settings & export', { exact: true }).click()
+    await page.getByText('Conversation settings', { exact: true }).waitFor({ timeout: 5000 })
     const drawer = page.locator('div.z-40').first()
 
     // Export (stub the native save dialog in the main process to a temp file).
@@ -237,7 +251,7 @@ async function run() {
     await drawer.locator('select').last().selectOption({ label: 'Creative' })
     await shot('04-overrides.png')
     await drawer.getByRole('button', { name: 'Save' }).click()
-    await page.getByText('Thread settings', { exact: true }).waitFor({ state: 'hidden', timeout: 5000 })
+    await page.getByText('Conversation settings', { exact: true }).waitFor({ state: 'hidden', timeout: 5000 })
     await page.waitForTimeout(200)
 
     const alpha = await page.evaluate(() => window.sibyl.conversations.get('e2e-alpha'))
@@ -280,7 +294,7 @@ async function run() {
       await window.sibyl.settings.set({ personas: [...(current.data?.personas ?? []), ...personas] })
       await window.sibyl.conversations.save({
         id: 'e2e-scene',
-        title: 'E2E bounded scene',
+        title: 'A storm at the beacon',
         modelId: null,
         createdAt: '2026-03-01T00:00:00.000Z',
         updatedAt: '2026-03-01T00:00:00.000Z',
@@ -326,9 +340,9 @@ async function run() {
       })
     })
     await page.reload()
-    await page.getByText('E2E bounded scene', { exact: true }).click()
+    await page.getByText('A storm at the beacon', { exact: true }).click()
     await page.getByTitle('More').click()
-    await page.getByText('Thread settings & export', { exact: true }).click()
+    await page.getByText('Conversation settings & export', { exact: true }).click()
     const sceneDrawer = page.locator('div.z-40').first()
     await sceneDrawer.getByText('Scene instruction', { exact: true }).waitFor()
     await assertAccessible('Scene settings dialog', '[role="dialog"]')
@@ -342,7 +356,7 @@ async function run() {
       'active persistent direction is editable in scene settings'
     )
     assert(
-      (await sceneDrawer.getByText('Copy from persona…', { exact: true }).count()) === 0,
+      (await sceneDrawer.getByText('Copy from character…', { exact: true }).count()) === 0,
       'scene settings hide the thread-only persona-copy control'
     )
     await sceneDrawer.getByRole('switch', { name: 'Local scene director' }).click()
@@ -372,6 +386,8 @@ async function run() {
       'scene persisted validated structured continuity state'
     )
     await page.getByText('Private · only Ada knows', { exact: true }).waitFor()
+    await shot('05-scene.png')
+    await assertAccessible('Scene')
     assert(
       filesUnder(userDataDir).every((file) => {
         try {
@@ -395,7 +411,7 @@ async function run() {
       })
     })
     await page.reload()
-    await page.getByText('E2E bounded scene', { exact: true }).click()
+    await page.getByText('A storm at the beacon', { exact: true }).click()
     assert(
       (await page.getByText('Ada', { exact: true }).count()) >= 1,
       'deleted library persona remains available from the frozen scene snapshot'
@@ -419,6 +435,7 @@ async function run() {
 
     // --- Settings: add a generation profile ---------------------------------
     await page.getByText('Settings', { exact: true }).click()
+    await page.getByRole('button', { name: 'Generation Context and sampling', exact: true }).click()
     const profileInput = page.getByPlaceholder('Name a new profile')
     await profileInput.waitFor({ timeout: 5000 })
     await profileInput.fill('E2E Profile')
@@ -438,6 +455,7 @@ async function run() {
       (settings2?.data?.generation?.stopSequences ?? []).includes('<<<END>>>'),
       'stop sequence persisted'
     )
+    await page.getByRole('button', { name: 'Appearance Reading and motion', exact: true }).click()
     await page.getByRole('switch', { name: 'Reduce motion' }).click()
     await page.getByRole('switch', { name: 'High contrast' }).click()
     await page.getByLabel('Text size').selectOption('1.125')
@@ -461,14 +479,29 @@ async function run() {
     await assertAccessible('Settings')
 
     // --- Encrypted portable library: export, content scan, preview, import ----
+    await page.getByRole('button', { name: 'Privacy & data Vault and portability', exact: true }).click()
     const bundlePath = path.join(outDir, 'portable-library.sibyl')
     await app.evaluate(async ({ dialog }, p) => {
       dialog.showSaveDialog = async () => ({ canceled: false, filePath: p })
     }, bundlePath)
     await page.getByRole('button', { name: 'Export encrypted library' }).click()
-    await page.getByLabel('Bundle recovery passphrase').fill(vaultPassphrase)
-    await page.getByLabel('Confirm passphrase').fill(vaultPassphrase)
-    await page.getByRole('button', { name: 'Choose save location' }).click()
+    const portableExportDialog = page.getByRole('dialog')
+    const bundlePassphrase = portableExportDialog.getByLabel('Bundle recovery passphrase')
+    const bundleConfirmation = portableExportDialog.getByLabel('Confirm passphrase')
+    await bundlePassphrase.fill(vaultPassphrase)
+    await page.waitForTimeout(50)
+    await bundleConfirmation.fill(vaultPassphrase)
+    await page.waitForFunction(
+      () => {
+        const button = [...document.querySelectorAll('button')].find(
+          (candidate) => candidate.textContent?.trim() === 'Choose save location'
+        )
+        return button instanceof HTMLButtonElement && !button.disabled
+      },
+      undefined,
+      { timeout: 5000 }
+    )
+    await portableExportDialog.getByRole('button', { name: 'Choose save location' }).click()
     await page.getByRole('dialog').waitFor({
       state: 'hidden',
       timeout: 30000
@@ -538,7 +571,7 @@ async function run() {
     await assertAccessible('Vault unlock')
     await page.getByLabel('Recovery passphrase', { exact: true }).fill(vaultPassphrase)
     await page.getByRole('button', { name: 'Unlock', exact: true }).click()
-    await page.getByText('New thread').waitFor({ timeout: 30000 })
+    await page.getByText('New conversation').waitFor({ timeout: 30000 })
     assert(
       (await page.getByText('Alpha chat about pelicans').count()) >= 1,
       'lock-now clears and recovery unlock reloads private state'

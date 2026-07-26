@@ -31,7 +31,8 @@ import {
   UsersIcon,
   StopIcon,
   RefreshIcon,
-  SpeakerIcon
+  SpeakerIcon,
+  SibylSigilIcon
 } from '../../lib/icons'
 
 /** Banner shown when the next reply may not fit the remaining context window. */
@@ -176,7 +177,7 @@ function HeaderMenu({
             }}
           >
             <SlidersIcon size={15} className={hasOverrides ? 'text-sibyl-accent' : 'text-sibyl-muted'} />
-            Thread settings & export
+            Conversation settings & export
           </button>
         </div>
       )}
@@ -203,32 +204,32 @@ function PersonaStrip({
       {/* The persona block itself is the edit affordance — no separate button. */}
       <button
         onClick={onEditPersona}
-        title={persona ? 'Edit persona' : 'Add a persona'}
+        title={persona ? 'Edit character' : 'Add a character'}
         className="no-drag group -mx-1.5 flex min-w-0 flex-1 items-center gap-3 rounded-lg px-1.5 py-1 text-left transition-colors hover:bg-sibyl-surface"
       >
         {persona ? (
           <Avatar avatar={persona.avatar} size={40} />
         ) : (
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-sibyl-border text-[15px] text-sibyl-accent">
-            ◆
+          <div className="sigil-frame h-10 w-10 shrink-0 rounded-full">
+            <SibylSigilIcon size={20} />
           </div>
         )}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="truncate font-mono text-[15px] font-bold tracking-tight text-sibyl-text">
+            <span className="truncate text-[15px] font-semibold tracking-tight text-sibyl-text">
               {persona ? persona.name : conversation.title}
             </span>
             {persona && (
               <span className="shrink-0 rounded-full border border-sibyl-accent-2/30 px-2 py-px font-mono text-[11px] text-sibyl-accent-2">
-                persona
+                character
               </span>
             )}
             <EditIcon size={12} className="shrink-0 text-sibyl-muted opacity-0 transition-opacity group-hover:opacity-70" />
           </div>
           <div className="truncate text-[12.5px] text-sibyl-muted">
             {persona
-              ? [persona.role, ...persona.voiceTags].filter(Boolean).join(' · ') || 'Persona'
-              : 'No persona · click to add'}
+              ? [persona.role, ...persona.voiceTags].filter(Boolean).join(' · ') || 'Character'
+              : 'No character · click to add'}
           </div>
         </div>
       </button>
@@ -315,7 +316,7 @@ function AddCastMenu({ conversation, disabled }: { conversation: Conversation; d
         <div className="absolute left-0 top-10 z-30 max-h-72 w-56 animate-fade-in overflow-y-auto rounded-lg border border-sibyl-border bg-sibyl-surface p-1 shadow-2xl">
           {available.length === 0 ? (
             <div className="px-2.5 py-3 text-center text-[12px] text-sibyl-muted">
-              Every persona is already in the cast.
+              Every character is already in the cast.
             </div>
           ) : (
             available.map((p) => (
@@ -638,7 +639,7 @@ export function ChatView() {
                     ? 'Press Play to watch the scene unfold, Step through it beat by beat, or speak and direct below.'
                     : persona
                       ? `Write the first beat with ${persona.name} below.`
-                      : 'Type a message below to begin a private, on-device conversation.'}
+                    : 'Write below to begin a private, on-device conversation.'}
                 </p>
               </div>
             ) : (
@@ -663,7 +664,6 @@ export function ChatView() {
                             highlighted={m.id === currentMatchId}
                             speaker={beatSpeaker}
                             avatar={scene ? beatPersona?.avatar : undefined}
-                            speakerColor={scene ? beatPersona?.avatar.gradient[0] : undefined}
                           />
                         </div>
                         {i === foldedThroughIdx && <CompactionDivider conversation={conversation!} />}

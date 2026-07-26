@@ -28,8 +28,6 @@ interface Props {
   speaker?: string
   /** In a scene: the speaking persona's avatar, shown beside the attribution. */
   avatar?: PersonaAvatar
-  /** In a scene: the speaker's accent colour for the attribution label. */
-  speakerColor?: string
 }
 
 const HIGHLIGHT = 'rounded-lg ring-2 ring-sibyl-accent/70 ring-offset-4 ring-offset-sibyl-bg'
@@ -47,8 +45,7 @@ function MessageImpl({
   isLast = false,
   highlighted = false,
   speaker = 'Sibyl',
-  avatar,
-  speakerColor
+  avatar
 }: Props) {
   const [copied, setCopied] = useState(false)
   const [editing, setEditing] = useState(false)
@@ -216,8 +213,7 @@ function MessageImpl({
       <div className="mb-2 flex items-center gap-2">
         {avatar && <Avatar avatar={avatar} size={22} glow={false} />}
         <span
-          className={`${LABEL} ${speakerColor ? '' : 'text-sibyl-accent'}`}
-          style={speakerColor ? { color: speakerColor } : undefined}
+          className={`${LABEL} text-sibyl-accent`}
         >
           {speaker}
         </span>
