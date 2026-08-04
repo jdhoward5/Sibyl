@@ -10,7 +10,7 @@ const { version } = JSON.parse(readFileSync(path.join(root, 'package.json'), 'ut
 const appDir = process.argv[2]
   ? path.resolve(process.argv[2])
   : path.join(root, 'release', version, process.platform === 'darwin' ? 'mac-arm64' : 'win-unpacked')
-const resources = path.join(appDir, 'resources')
+const resources = path.join(appDir, appDir.endsWith('.app') ? 'Contents/Resources' : 'resources')
 const archive = path.join(resources, 'app.asar')
 const unpacked = `${archive}.unpacked`
 
