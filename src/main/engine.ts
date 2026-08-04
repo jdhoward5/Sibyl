@@ -18,7 +18,13 @@ import type {
   SceneDirectorDecision
 } from '@shared/types'
 import { DEFAULT_GENERATION_OPTIONS } from '@shared/types'
-import { contextLevel, keepRecentCount, summaryBudgetTokens } from '@shared/context'
+import {
+  adaptiveResponseReserve,
+  compactionTailBudget,
+  contextLevel,
+  keepRecentCount,
+  summaryBudgetTokens
+} from '@shared/context'
 import {
   personaPromptForSpeaker,
   messageContentForSpeaker,
@@ -631,6 +637,11 @@ export class InferenceEngine extends EventEmitter {
     try {
       const settings = await getSettings()
       const opts = this.generationFor(conversation, settings, optionsOverride)
+      const maxTokens = this.availableCompletionTokens(
+        conversation,
+        settings,
+        opts.maxTokens
+      )
       const session = await this.ensureSession(conversation, userText)
       await this.setState('generating')
       if (controller.signal.aborted) throw new Error('Generation aborted.')
@@ -643,7 +654,7 @@ export class InferenceEngine extends EventEmitter {
         topP: opts.topP,
         topK: opts.topK,
         minP: opts.minP,
-        maxTokens: opts.maxTokens,
+        maxTokens,
         seed: opts.seed,
         repeatPenalty: { penalty: opts.repeatPenalty },
         customStopTriggers: opts.stopSequences?.length ? opts.stopSequences : undefined,
@@ -939,6 +950,12 @@ export class InferenceEngine extends EventEmitter {
         return
       }
       const opts = this.generationFor(conversation, settings, optionsOverride, speaker)
+      const maxTokens = this.availableCompletionTokens(
+        conversation,
+        settings,
+        opts.maxTokens,
+        speaker.id
+      )
       const beat = buildBeatPrompt({
         // Honor compaction: feed only the un-folded tail; the summary rides in
         // the system turn below (older turns were condensed to save context).
@@ -974,7 +991,7 @@ export class InferenceEngine extends EventEmitter {
         topP: opts.topP,
         topK: opts.topK,
         minP: opts.minP,
-        maxTokens: opts.maxTokens,
+        maxTokens,
         seed: opts.seed,
         repeatPenalty: { penalty: opts.repeatPenalty },
         customStopTriggers: stopTriggers.length ? stopTriggers : undefined,
@@ -1176,9 +1193,24 @@ export class InferenceEngine extends EventEmitter {
     settings: AppSettings,
     sceneSpeakerId?: string
   ): number {
+    const recentCompletionTokens = conversation.messages
+      .filter(
+        (message) =>
+          message.role === 'assistant' &&
+          !message.error &&
+          (message.stats?.completionTokens ?? 0) > 0
+      )
+      .slice(-8)
+      .map((message) => message.stats!.completionTokens)
+    const reserveFor = (maxTokens: number): number =>
+      adaptiveResponseReserve(
+        recentCompletionTokens,
+        maxTokens,
+        this.contextSize ?? settings.load.contextSize
+      )
     if (!isScene(conversation)) {
       if (sceneSpeakerId) throw new Error('A next speaker can only be selected for a scene.')
-      return this.generationFor(conversation, settings, undefined).maxTokens
+      return reserveFor(this.generationFor(conversation, settings, undefined).maxTokens)
     }
 
     const cast = sceneCast(conversation, settings.personas)
@@ -1188,18 +1220,75 @@ export class InferenceEngine extends EventEmitter {
       }
       const speaker = cast.find((persona) => persona.id === sceneSpeakerId)
       if (!speaker) throw new Error('The selected next speaker is unavailable.')
-      return this.generationFor(conversation, settings, undefined, speaker).maxTokens
+      return reserveFor(
+        this.generationFor(conversation, settings, undefined, speaker).maxTokens
+      )
     }
 
-    // Without a committed speaker, reserve the largest configured cast response
+    // Without a committed speaker, reserve the largest adaptive cast response
     // so autoplay and manual stepping cannot underestimate the next beat.
     return cast.length
       ? Math.max(
           ...cast.map(
-            (persona) => this.generationFor(conversation, settings, undefined, persona).maxTokens
+            (persona) =>
+              reserveFor(
+                this.generationFor(conversation, settings, undefined, persona).maxTokens
+              )
           )
         )
-      : this.generationFor(conversation, settings, undefined).maxTokens
+      : reserveFor(this.generationFor(conversation, settings, undefined).maxTokens)
+  }
+
+  /** Typical persisted user-turn growth to include in ordinary-chat runway. */
+  private expectedUserTurnTokens(conversation: Conversation): number {
+    const samples = conversation.messages
+      .filter((message) => message.role === 'user' && !message.director && message.content.trim())
+      .slice(-8)
+      .map((message) => this.tokenCount(message.content) + 4)
+      .sort((a, b) => a - b)
+    if (!samples.length) return 64
+    const p75 = samples[Math.max(0, Math.ceil(samples.length * 0.75) - 1)]
+    return Math.min(1024, Math.max(64, Math.ceil(p75 * 1.2 + 16)))
+  }
+
+  /**
+   * Estimate prompt tokens that compaction cannot reclaim: system/persona/scene
+   * framing and other fixed overhead, excluding the live tail and old summary.
+   * For scenes use the largest cast prompt so changing speakers stays safe.
+   */
+  private fixedPromptTokensForCompaction(
+    conversation: Conversation,
+    settings: AppSettings,
+    liveTokens: number,
+    summaryTokens: number
+  ): number {
+    const estimates = isScene(conversation)
+      ? sceneCast(conversation, settings.personas).map((persona) =>
+          this.estimateConversationTokens(conversation, settings, persona.id)
+        )
+      : [this.estimateConversationTokens(conversation, settings)]
+    const total = estimates.length ? Math.max(...estimates) : 0
+    return Math.max(0, total - liveTokens - summaryTokens)
+  }
+
+  /**
+   * Keep a statistically sized preflight reserve safe by hard-capping the
+   * actual request to the tokens that remain after its complete prompt.
+   */
+  private availableCompletionTokens(
+    conversation: Conversation,
+    settings: AppSettings,
+    configuredMaxTokens: number,
+    sceneSpeakerId?: string
+  ): number {
+    const contextSize = this.contextSize ?? 0
+    if (contextSize <= 0) return configuredMaxTokens
+    const promptTokens = this.estimateConversationTokens(
+      conversation,
+      settings,
+      sceneSpeakerId
+    )
+    return Math.max(1, Math.min(configuredMaxTokens, contextSize - promptTokens - 16))
   }
 
   private async computeUsageSnapshot(
@@ -1303,12 +1392,44 @@ export class InferenceEngine extends EventEmitter {
       // count can leave the window full). Falls back to the count when the
       // context size isn't known yet.
       const contextSize = this.contextSize ?? 0
+      const recentTokens = [...live]
+        .reverse()
+        .map((message) => this.tokenCount(message.content) + 4)
+      const liveTokens = recentTokens.reduce((total, tokens) => total + tokens, 0)
+      const priorSummary = conversation.compaction?.summary?.trim()
+      const priorSummaryTokens = priorSummary ? this.tokenCount(priorSummary) : 0
+      const summaryBudget = summaryBudgetTokens(
+        contextSize,
+        settings.context.summaryTokenFraction
+      )
+      const responseReserve = this.responseReserve(conversation, settings)
+      const expectedTurnTokens =
+        responseReserve + (isScene(conversation) ? 0 : this.expectedUserTurnTokens(conversation))
+      const targetTailTokens =
+        contextSize > 0
+          ? compactionTailBudget({
+              contextSize,
+              compactThreshold: settings.context.compactThreshold,
+              compactTargetFraction: settings.context.compactTargetFraction,
+              compactRunwayTurns: settings.context.compactRunwayTurns,
+              expectedTurnTokens,
+              fixedPromptTokens: this.fixedPromptTokensForCompaction(
+                conversation,
+                settings,
+                liveTokens,
+                priorSummaryTokens
+              ),
+              summaryTokens: summaryBudget,
+              maxTailFraction: settings.context.keepRecentFraction
+            })
+          : 0
       const keep =
         contextSize > 0
           ? keepRecentCount(
-              [...live].reverse().map((m) => this.tokenCount(m.content) + 4),
+              recentTokens,
               maxKeep,
-              Math.round(contextSize * settings.context.keepRecentFraction)
+              targetTailTokens,
+              1
             )
           : maxKeep
       const foldCount = live.length - keep
@@ -1318,7 +1439,6 @@ export class InferenceEngine extends EventEmitter {
       const toFold = live.slice(0, foldCount)
       const throughMessageId = toFold[toFold.length - 1].id
 
-      const priorSummary = conversation.compaction?.summary?.trim()
       // Preserve scene attribution: fold beats under their speaker's name and
       // director notes under "Director", so the summary doesn't collapse a cast
       // into one voice (it rides in every later beat's system prompt).
@@ -1393,7 +1513,7 @@ export class InferenceEngine extends EventEmitter {
           temperature: 0.3,
           // Scale the summary budget to the window so a large context isn't
           // stuck with a tiny (fixed-600) summary that loses detail every pass.
-          maxTokens: summaryBudgetTokens(contextSize, settings.context.summaryTokenFraction)
+          maxTokens: summaryBudget
         })
         if (controller.signal.aborted) throw new Error('Compaction cancelled.')
         if (isScene(conversation)) {

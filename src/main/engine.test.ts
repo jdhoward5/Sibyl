@@ -17,6 +17,8 @@ const fakes = vi.hoisted(() => {
       autoCompact: true,
       compactThreshold: 0.85,
       warnThreshold: 0.7,
+      compactTargetFraction: 0.5,
+      compactRunwayTurns: 3,
       keepRecentMessages: 12,
       keepRecentFraction: 0.35,
       summaryTokenFraction: 0.1
@@ -368,6 +370,8 @@ describe('InferenceEngine lifecycle', () => {
     fakes.settings.generation.maxTokens = 256
     fakes.settings.context.keepRecentMessages = 12
     fakes.settings.context.keepRecentFraction = 0.35
+    fakes.settings.context.compactTargetFraction = 0.5
+    fakes.settings.context.compactRunwayTurns = 3
     fakes.settings.personas = []
   })
 
@@ -571,7 +575,56 @@ describe('InferenceEngine lifecycle', () => {
     expect(projected.exact).toBe(false)
   })
 
-  it('uses the selected scene speaker reserve and otherwise reserves the largest cast reply', async () => {
+  it('adapts response reserve to recent completion lengths', async () => {
+    const first = nativeModel()
+    fakes.llama.loadModel.mockResolvedValueOnce(first.value)
+    fakes.settings.generation.maxTokens = 2048
+    const withStats: Conversation = {
+      ...conversation,
+      messages: [500, 900, 1200].map((completionTokens, index) => ({
+        id: `assistant-${index}`,
+        role: 'assistant' as const,
+        content: 'completed response',
+        createdAt: '',
+        stats: {
+          promptTokens: 10,
+          completionTokens,
+          tokensPerSecond: 1,
+          durationMs: 1
+        }
+      }))
+    }
+    const engine = new InferenceEngine()
+    await engine.load('model-a')
+
+    const usage = await engine.computeUsage(withStats)
+
+    expect(usage.responseReserveTokens).toBe(1684)
+  })
+
+  it('compacts far enough to reach the low-water target', async () => {
+    const first = nativeModel()
+    fakes.llama.loadModel.mockResolvedValueOnce(first.value)
+    const longHistory: Conversation = {
+      ...conversation,
+      messages: Array.from({ length: 4 }, (_, index) => ({
+        id: `message-${index + 1}`,
+        role: 'assistant' as const,
+        content: 'x'.repeat(1_600),
+        createdAt: ''
+      }))
+    }
+    const engine = new InferenceEngine()
+    await engine.load('model-a')
+    fakes.sessions.at(-1)!.prompt.mockResolvedValueOnce('A short cumulative summary.')
+
+    const result = await engine.compact(longHistory)
+
+    expect(result.compaction.throughMessageId).toBe('message-3')
+    expect(result.compaction.foldedCount).toBe(3)
+  })
+
+  it('uses the selected scene speaker ceiling and otherwise the largest adaptive cast reserve', async () => {
     const first = nativeModel()
     fakes.llama.loadModel.mockResolvedValueOnce(first.value)
     fakes.settings.personas = [
@@ -610,7 +663,7 @@ describe('InferenceEngine lifecycle', () => {
     const conservative = await engine.computeUsage(scene)
 
     expect(selected.responseReserveTokens).toBe(128)
-    expect(conservative.responseReserveTokens).toBe(768)
+    expect(conservative.responseReserveTokens).toBe(256)
     await expect(
       engine.computeProjectedUsage(scene, {
         conversationId: scene.id,

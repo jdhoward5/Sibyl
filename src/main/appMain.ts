@@ -205,8 +205,18 @@ async function runSmoke(win: BrowserWindow): Promise<void> {
   try {
     const modelFile = process.env.SIBYL_SMOKE_MODEL
     if (modelFile) {
-      const smokeUserData = path.resolve(app.getPath('userData'))
-      const smokeTempRoot = path.resolve(app.getPath('temp'))
+      // macOS exposes the same temp tree through both /var and /private/var.
+      // Canonicalize before containment checks so the alias cannot reject a
+      // genuinely isolated profile (or weaken the child-of-temp requirement).
+      const canonicalPath = (value: string): string => {
+        try {
+          return fs.realpathSync.native(value)
+        } catch {
+          return path.resolve(value)
+        }
+      }
+      const smokeUserData = canonicalPath(app.getPath('userData'))
+      const smokeTempRoot = canonicalPath(app.getPath('temp'))
       const smokeRelative = path.relative(smokeTempRoot, smokeUserData)
       if (
         process.env.SIBYL_SMOKE_ISOLATED !== '1' ||

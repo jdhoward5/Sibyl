@@ -225,6 +225,18 @@ describe('IPC runtime validation', () => {
     expect(patch.tts?.rate).toBe(2)
     expect(patch.tts?.volume).toBe(0)
     expect(patch.accessibility?.textScale).toBe(1.125)
+    const legacyContext = parseRendererSettingsPatch({
+      context: {
+        autoCompact: true,
+        compactThreshold: 0.85,
+        warnThreshold: 0.7,
+        keepRecentMessages: 6,
+        keepRecentFraction: 0.35,
+        summaryTokenFraction: 0.06
+      }
+    })
+    expect(legacyContext.context?.compactTargetFraction).toBe(0.5)
+    expect(legacyContext.context?.compactRunwayTurns).toBe(3)
     expect(() =>
       parseRendererSettingsPatch({
         accessibility: { reducedMotion: true, highContrast: true, textScale: 1.2 }

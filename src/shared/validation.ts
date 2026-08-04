@@ -23,6 +23,7 @@ import type {
   SystemPromptPreset,
   UserCharacter
 } from './types'
+import { DEFAULT_CONTEXT_SETTINGS } from './types'
 import type {
   ChatAbortRequest,
   ChatAdvanceRequest,
@@ -868,13 +869,30 @@ function parseContextSettings(value: unknown, path: string): ContextSettings {
   const v = object(value, path)
   keys(
     v,
-    ['autoCompact', 'compactThreshold', 'warnThreshold', 'keepRecentMessages', 'keepRecentFraction', 'summaryTokenFraction'],
+    [
+      'autoCompact',
+      'compactThreshold',
+      'warnThreshold',
+      'compactTargetFraction',
+      'compactRunwayTurns',
+      'keepRecentMessages',
+      'keepRecentFraction',
+      'summaryTokenFraction'
+    ],
     path
   )
   return {
     autoCompact: bool(v.autoCompact, `${path}.autoCompact`),
     compactThreshold: finite(v.compactThreshold, `${path}.compactThreshold`, 0.1, 0.99),
     warnThreshold: finite(v.warnThreshold, `${path}.warnThreshold`, 0.1, 0.99),
+    compactTargetFraction:
+      v.compactTargetFraction === undefined
+        ? DEFAULT_CONTEXT_SETTINGS.compactTargetFraction
+        : finite(v.compactTargetFraction, `${path}.compactTargetFraction`, 0.1, 0.9),
+    compactRunwayTurns:
+      v.compactRunwayTurns === undefined
+        ? DEFAULT_CONTEXT_SETTINGS.compactRunwayTurns
+        : finite(v.compactRunwayTurns, `${path}.compactRunwayTurns`, 1, 12, true),
     keepRecentMessages: finite(v.keepRecentMessages, `${path}.keepRecentMessages`, 1, 1_000, true),
     keepRecentFraction: finite(v.keepRecentFraction, `${path}.keepRecentFraction`, 0.05, 0.9),
     summaryTokenFraction: finite(v.summaryTokenFraction, `${path}.summaryTokenFraction`, 0.01, 0.5)

@@ -64,6 +64,70 @@ export function summaryBudgetTokens(contextSize: number, fraction: number): numb
 }
 
 /**
+ * Reserve a realistic next response rather than the configured worst-case on
+ * every turn. The configured value remains a hard ceiling; recent p90 output is
+ * padded for variance and a context-scaled floor protects new conversations.
+ */
+export function adaptiveResponseReserve(
+  recentCompletionTokens: number[],
+  configuredMaxTokens: number,
+  contextSize: number
+): number {
+  const ceiling = Math.max(1, Math.floor(configuredMaxTokens))
+  const contextFloor = Number.isFinite(contextSize) && contextSize > 0
+    ? Math.round(contextSize * 0.1)
+    : 512
+  const floor = Math.min(ceiling, Math.max(256, Math.min(768, contextFloor)))
+  const samples = recentCompletionTokens
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .map((value) => Math.floor(value))
+    .sort((a, b) => a - b)
+  if (!samples.length) return floor
+  const p90 = samples[Math.max(0, Math.ceil(samples.length * 0.9) - 1)]
+  return Math.min(ceiling, Math.max(floor, Math.ceil(p90 * 1.35 + 64)))
+}
+
+export interface CompactionTailBudgetParams {
+  contextSize: number
+  compactThreshold: number
+  compactTargetFraction: number
+  compactRunwayTurns: number
+  expectedTurnTokens: number
+  fixedPromptTokens: number
+  summaryTokens: number
+  maxTailFraction: number
+}
+
+/**
+ * Token budget for the verbatim tail after compaction. This creates hysteresis:
+ * occupancy is driven to a low-water target and, for unusually long replies,
+ * lower still so the configured number of future turns fit below the trigger.
+ */
+export function compactionTailBudget(params: CompactionTailBudgetParams): number {
+  const contextSize = Math.max(0, Math.floor(params.contextSize))
+  if (!contextSize) return 0
+  const threshold = Math.min(0.99, Math.max(0.1, params.compactThreshold))
+  const target = Math.min(threshold, Math.max(0.1, params.compactTargetFraction))
+  const runwayTurns = Math.max(1, Math.floor(params.compactRunwayTurns))
+  const expectedTurnTokens = Math.max(1, Math.floor(params.expectedTurnTokens))
+  const lowWater = Math.round(contextSize * target)
+  const runwayLowWater =
+    Math.round(contextSize * threshold) - runwayTurns * expectedTurnTokens
+  const postCompactTarget = Math.max(0, Math.min(lowWater, runwayLowWater))
+  const available = Math.max(
+    0,
+    postCompactTarget -
+      Math.max(0, Math.floor(params.fixedPromptTokens)) -
+      Math.max(0, Math.floor(params.summaryTokens))
+  )
+  const tailCap = Math.max(
+    0,
+    Math.round(contextSize * Math.min(0.9, Math.max(0, params.maxTailFraction)))
+  )
+  return Math.min(available, tailCap)
+}
+
+/**
  * How many of the most recent messages to keep verbatim during compaction.
  * Keeps up to `maxKeep` (the user's keepRecentMessages), but folds more when the
  * recent tail is large so the post-compaction live tail fits `keepBudgetTokens` —

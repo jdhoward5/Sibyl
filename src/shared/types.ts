@@ -483,6 +483,10 @@ export interface ContextSettings {
   compactThreshold: number
   /** Fraction (0..1) at which the UI surfaces a warning. */
   warnThreshold: number
+  /** Desired maximum occupancy immediately after compaction. */
+  compactTargetFraction: number
+  /** Number of realistically sized future turns compaction should make room for. */
+  compactRunwayTurns: number
   /** Upper bound on most-recent messages kept verbatim (never folded). */
   keepRecentMessages: number
   /**
@@ -500,6 +504,8 @@ export const DEFAULT_CONTEXT_SETTINGS: ContextSettings = {
   autoCompact: true,
   compactThreshold: 0.85,
   warnThreshold: 0.7,
+  compactTargetFraction: 0.5,
+  compactRunwayTurns: 3,
   keepRecentMessages: 6,
   keepRecentFraction: 0.35,
   summaryTokenFraction: 0.06
@@ -647,7 +653,7 @@ export interface ContextUsage {
   usedTokens: number
   /** Total size of the loaded context window in tokens (0 when no model). */
   contextSize: number
-  /** Tokens budgeted for the next response (generation.maxTokens). */
+  /** Adaptive token budget for the next response, bounded by generation.maxTokens. */
   responseReserveTokens: number
   /** usedTokens / contextSize, clamped to 0..1. */
   fraction: number

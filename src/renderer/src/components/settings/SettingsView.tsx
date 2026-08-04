@@ -552,6 +552,24 @@ export function SettingsView() {
               format={(v) => `${Math.round(v * 100)}% full`}
             />
             <Slider
+              label="Post-compact target"
+              value={ctx.compactTargetFraction}
+              min={0.3}
+              max={0.7}
+              step={0.05}
+              onChange={(v) => update({ context: { ...ctx, compactTargetFraction: v } })}
+              format={(v) => `${Math.round(v * 100)}% full`}
+            />
+            <Slider
+              label="Compaction runway"
+              value={ctx.compactRunwayTurns}
+              min={2}
+              max={6}
+              step={1}
+              onChange={(v) => update({ context: { ...ctx, compactRunwayTurns: v } })}
+              format={(v) => `${v} turns`}
+            />
+            <Slider
               label="Keep recent messages"
               value={ctx.keepRecentMessages}
               min={2}

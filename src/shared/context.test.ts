@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
+  adaptiveResponseReserve,
+  compactionTailBudget,
   contextLevel,
   contextPercent,
   contextUsageIsCurrent,
@@ -80,6 +82,51 @@ describe('summaryBudgetTokens', () => {
   it('defaults the fraction when given a bad one', () => {
     expect(summaryBudgetTokens(8192, 0)).toBe(492)
     expect(summaryBudgetTokens(8192, NaN)).toBe(492)
+  })
+})
+
+describe('adaptiveResponseReserve', () => {
+  it('uses a safe context-scaled floor before completion history exists', () => {
+    expect(adaptiveResponseReserve([], 2048, 8192)).toBe(768)
+    expect(adaptiveResponseReserve([], 256, 8192)).toBe(256)
+  })
+
+  it('pads recent p90 output while respecting the configured ceiling', () => {
+    expect(adaptiveResponseReserve([200, 300, 400, 500], 2048, 8192)).toBe(768)
+    expect(adaptiveResponseReserve([500, 900, 1200], 2048, 8192)).toBe(1684)
+    expect(adaptiveResponseReserve([3000], 2048, 8192)).toBe(2048)
+  })
+})
+
+describe('compactionTailBudget', () => {
+  it('targets a low-water mark while honoring the recent-tail cap', () => {
+    expect(
+      compactionTailBudget({
+        contextSize: 8192,
+        compactThreshold: 0.85,
+        compactTargetFraction: 0.5,
+        compactRunwayTurns: 3,
+        expectedTurnTokens: 768,
+        fixedPromptTokens: 900,
+        summaryTokens: 492,
+        maxTailFraction: 0.35
+      })
+    ).toBe(2704)
+  })
+
+  it('lowers the target when long turns need more runway', () => {
+    expect(
+      compactionTailBudget({
+        contextSize: 8192,
+        compactThreshold: 0.85,
+        compactTargetFraction: 0.5,
+        compactRunwayTurns: 3,
+        expectedTurnTokens: 1500,
+        fixedPromptTokens: 900,
+        summaryTokens: 492,
+        maxTailFraction: 0.35
+      })
+    ).toBe(1071)
   })
 })
 

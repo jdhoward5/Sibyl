@@ -1456,16 +1456,16 @@ export const actions = {
           conv = state.conversations.find((c) => c.id === conversationId) ?? conv
           if (
             state.scenePlay?.convId === conversationId &&
-            state.scenePlay.status === 'running'
+            state.scenePlay.status === 'running' &&
+            maintenanceDue
           ) {
-            actions.stopScenePlay(
-              maintenanceDue ? 'memory-maintenance' : 'context-compaction'
-            )
+            // Continuity maintenance changes the scene's durable memory and is
+            // still worth reviewing. Routine context reclamation is mechanical:
+            // keep the bounded run alive and generate this beat immediately.
+            actions.stopScenePlay('memory-maintenance')
             transitionTurn(operationId, { phase: 'complete' })
             toast(
-              maintenanceDue
-                ? 'Continuity memory was refreshed. Review it, then continue the scene.'
-                : 'Context was summarized. Review it, then continue the scene when ready.',
+              'Continuity memory was refreshed. Review it, then continue the scene.',
               'info'
             )
             return false
