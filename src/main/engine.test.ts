@@ -602,6 +602,42 @@ describe('InferenceEngine lifecycle', () => {
     expect(usage.responseReserveTokens).toBe(1684)
   })
 
+  it('rejects a prompt that already exceeds the context window', async () => {
+    const first = nativeModel()
+    fakes.llama.loadModel.mockResolvedValueOnce(first.value)
+    const oversized: Conversation = {
+      ...conversation,
+      messages: [
+        {
+          id: 'user-large',
+          role: 'user',
+          content: 'x'.repeat(10_000),
+          createdAt: ''
+        },
+        {
+          id: 'assistant-large',
+          role: 'assistant',
+          content: '',
+          createdAt: ''
+        }
+      ]
+    }
+    const engine = new InferenceEngine()
+    await engine.load('model-a')
+    const events: GenerationEvent[] = []
+    engine.on('event', (event) => events.push(event as GenerationEvent))
+
+    await engine.generate(oversized, oversized.messages[0].content, 'assistant-large', undefined)
+
+    expect(fakes.sessions.at(-1)!.prompt).not.toHaveBeenCalled()
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'error',
+        error: expect.stringMatching(/fills the context window/)
+      })
+    )
+  })
+
   it('compacts far enough to reach the low-water target', async () => {
     const first = nativeModel()
     fakes.llama.loadModel.mockResolvedValueOnce(first.value)

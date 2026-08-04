@@ -3,6 +3,7 @@ import { actions, uid, useStore } from '../../store'
 import type { GenerationProfile, RendererSettings, RendererSettingsPatch } from '@shared/types'
 import { TTS_VOICE_CATALOG } from '@shared/tts'
 import { formatBytes } from '@shared/format'
+import { normalizeCompactionTarget } from '@shared/context'
 import { Section, Slider, Toggle } from '../common/controls'
 import {
   PortableExportDialog,
@@ -411,6 +412,10 @@ export function SettingsView() {
   const gen = settings.generation
   const load = settings.load
   const ctx = settings.context
+  const compactTarget = normalizeCompactionTarget(
+    ctx.compactTargetFraction,
+    ctx.compactThreshold
+  )
 
   // Offer only the backends that exist on the current OS: Metal on macOS,
   // CUDA/Vulkan on Windows. 'Auto' and 'CPU' are always valid.
@@ -539,7 +544,18 @@ export function SettingsView() {
               min={0.5}
               max={0.98}
               step={0.01}
-              onChange={(v) => update({ context: { ...ctx, compactThreshold: v } })}
+              onChange={(v) =>
+                update({
+                  context: {
+                    ...ctx,
+                    compactThreshold: v,
+                    compactTargetFraction: normalizeCompactionTarget(
+                      ctx.compactTargetFraction,
+                      v
+                    )
+                  }
+                })
+              }
               format={(v) => `${Math.round(v * 100)}% full`}
             />
             <Slider
@@ -553,7 +569,7 @@ export function SettingsView() {
             />
             <Slider
               label="Post-compact target"
-              value={ctx.compactTargetFraction}
+              value={compactTarget}
               min={0.3}
               max={0.7}
               step={0.05}

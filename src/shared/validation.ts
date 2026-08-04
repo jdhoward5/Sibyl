@@ -24,6 +24,7 @@ import type {
   UserCharacter
 } from './types'
 import { DEFAULT_CONTEXT_SETTINGS } from './types'
+import { normalizeCompactionTarget } from './context'
 import type {
   ChatAbortRequest,
   ChatAdvanceRequest,
@@ -881,14 +882,16 @@ function parseContextSettings(value: unknown, path: string): ContextSettings {
     ],
     path
   )
+  const compactThreshold = finite(v.compactThreshold, `${path}.compactThreshold`, 0.1, 0.99)
+  const requestedTarget =
+    v.compactTargetFraction === undefined
+      ? DEFAULT_CONTEXT_SETTINGS.compactTargetFraction
+      : finite(v.compactTargetFraction, `${path}.compactTargetFraction`, 0.1, 0.9)
   return {
     autoCompact: bool(v.autoCompact, `${path}.autoCompact`),
-    compactThreshold: finite(v.compactThreshold, `${path}.compactThreshold`, 0.1, 0.99),
+    compactThreshold,
     warnThreshold: finite(v.warnThreshold, `${path}.warnThreshold`, 0.1, 0.99),
-    compactTargetFraction:
-      v.compactTargetFraction === undefined
-        ? DEFAULT_CONTEXT_SETTINGS.compactTargetFraction
-        : finite(v.compactTargetFraction, `${path}.compactTargetFraction`, 0.1, 0.9),
+    compactTargetFraction: normalizeCompactionTarget(requestedTarget, compactThreshold),
     compactRunwayTurns:
       v.compactRunwayTurns === undefined
         ? DEFAULT_CONTEXT_SETTINGS.compactRunwayTurns

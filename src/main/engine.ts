@@ -1201,7 +1201,7 @@ export class InferenceEngine extends EventEmitter {
           (message.stats?.completionTokens ?? 0) > 0
       )
       .slice(-8)
-      .map((message) => message.stats!.completionTokens)
+      .map((message) => message.stats?.completionTokens ?? 0)
     const reserveFor = (maxTokens: number): number =>
       adaptiveResponseReserve(
         recentCompletionTokens,
@@ -1288,7 +1288,11 @@ export class InferenceEngine extends EventEmitter {
       settings,
       sceneSpeakerId
     )
-    return Math.max(1, Math.min(configuredMaxTokens, contextSize - promptTokens - 16))
+    const available = contextSize - promptTokens - 16
+    if (available < 1) {
+      throw new Error('The conversation prompt fills the context window. Compact it and try again.')
+    }
+    return Math.min(configuredMaxTokens, available)
   }
 
   private async computeUsageSnapshot(

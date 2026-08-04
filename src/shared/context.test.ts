@@ -9,6 +9,7 @@ import {
   formatTokens,
   keepRecentCount,
   levelColor,
+  normalizeCompactionTarget,
   summaryBudgetTokens
 } from './context'
 
@@ -99,6 +100,11 @@ describe('adaptiveResponseReserve', () => {
 })
 
 describe('compactionTailBudget', () => {
+  it('keeps the low-water target below the trigger threshold', () => {
+    expect(normalizeCompactionTarget(0.7, 0.5)).toBeCloseTo(0.45)
+    expect(normalizeCompactionTarget(0.4, 0.85)).toBe(0.4)
+  })
+
   it('targets a low-water mark while honoring the recent-tail cap', () => {
     expect(
       compactionTailBudget({
@@ -127,6 +133,33 @@ describe('compactionTailBudget', () => {
         maxTailFraction: 0.35
       })
     ).toBe(1071)
+  })
+
+  it('is safe for non-finite tunables', () => {
+    expect(
+      compactionTailBudget({
+        contextSize: 8192,
+        compactThreshold: NaN,
+        compactTargetFraction: NaN,
+        compactRunwayTurns: NaN,
+        expectedTurnTokens: NaN,
+        fixedPromptTokens: 900,
+        summaryTokens: 492,
+        maxTailFraction: NaN
+      })
+    ).toBe(0)
+    expect(
+      compactionTailBudget({
+        contextSize: Infinity,
+        compactThreshold: 0.85,
+        compactTargetFraction: 0.5,
+        compactRunwayTurns: 3,
+        expectedTurnTokens: 768,
+        fixedPromptTokens: 900,
+        summaryTokens: 492,
+        maxTailFraction: 0.35
+      })
+    ).toBe(0)
   })
 })
 

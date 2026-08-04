@@ -237,6 +237,14 @@ describe('IPC runtime validation', () => {
     })
     expect(legacyContext.context?.compactTargetFraction).toBe(0.5)
     expect(legacyContext.context?.compactRunwayTurns).toBe(3)
+    const normalizedContext = parseRendererSettingsPatch({
+      context: {
+        ...legacyContext.context!,
+        compactThreshold: 0.5,
+        compactTargetFraction: 0.8
+      }
+    })
+    expect(normalizedContext.context?.compactTargetFraction).toBeCloseTo(0.45)
     expect(() =>
       parseRendererSettingsPatch({
         accessibility: { reducedMotion: true, highContrast: true, textScale: 1.2 }

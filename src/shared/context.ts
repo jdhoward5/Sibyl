@@ -3,6 +3,10 @@
 
 import type { ContextLevel, ContextUsage } from './types'
 
+function finiteInRange(value: number, fallback: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Number.isFinite(value) ? value : fallback))
+}
+
 /** True only when a usage response still belongs to the requested, visible thread. */
 export function contextUsageIsCurrent(
   usage: Pick<ContextUsage, 'conversationId'> | null | undefined,
@@ -69,11 +73,13 @@ export function summaryBudgetTokens(contextSize: number, fraction: number): numb
  * padded for variance and a context-scaled floor protects new conversations.
  */
 export function adaptiveResponseReserve(
-  recentCompletionTokens: number[],
+  recentCompletionTokens: readonly number[],
   configuredMaxTokens: number,
   contextSize: number
 ): number {
-  const ceiling = Math.max(1, Math.floor(configuredMaxTokens))
+  const ceiling = Math.floor(
+    finiteInRange(configuredMaxTokens, 1, 1, Number.MAX_SAFE_INTEGER)
+  )
   const contextFloor = Number.isFinite(contextSize) && contextSize > 0
     ? Math.round(contextSize * 0.1)
     : 512
@@ -85,6 +91,12 @@ export function adaptiveResponseReserve(
   if (!samples.length) return floor
   const p90 = samples[Math.max(0, Math.ceil(samples.length * 0.9) - 1)]
   return Math.min(ceiling, Math.max(floor, Math.ceil(p90 * 1.35 + 64)))
+}
+
+/** Keep a real low-water gap below the high-water compaction trigger. */
+export function normalizeCompactionTarget(target: number, threshold: number): number {
+  const highWater = finiteInRange(threshold, 0.85, 0.1, 0.99)
+  return finiteInRange(target, 0.5, 0.1, Math.max(0.1, highWater - 0.05))
 }
 
 export interface CompactionTailBudgetParams {
@@ -104,26 +116,32 @@ export interface CompactionTailBudgetParams {
  * lower still so the configured number of future turns fit below the trigger.
  */
 export function compactionTailBudget(params: CompactionTailBudgetParams): number {
-  const contextSize = Math.max(0, Math.floor(params.contextSize))
-  if (!contextSize) return 0
-  const threshold = Math.min(0.99, Math.max(0.1, params.compactThreshold))
-  const target = Math.min(threshold, Math.max(0.1, params.compactTargetFraction))
-  const runwayTurns = Math.max(1, Math.floor(params.compactRunwayTurns))
-  const expectedTurnTokens = Math.max(1, Math.floor(params.expectedTurnTokens))
+  if (!Number.isFinite(params.contextSize) || params.contextSize <= 0) return 0
+  const contextSize = Math.floor(params.contextSize)
+  const threshold = finiteInRange(params.compactThreshold, 0.85, 0.1, 0.99)
+  const target = normalizeCompactionTarget(params.compactTargetFraction, threshold)
+  const runwayTurns = Math.floor(
+    finiteInRange(params.compactRunwayTurns, 3, 1, Number.MAX_SAFE_INTEGER)
+  )
+  const expectedTurnTokens = Math.floor(
+    finiteInRange(params.expectedTurnTokens, 1, 1, Number.MAX_SAFE_INTEGER)
+  )
   const lowWater = Math.round(contextSize * target)
   const runwayLowWater =
     Math.round(contextSize * threshold) - runwayTurns * expectedTurnTokens
   const postCompactTarget = Math.max(0, Math.min(lowWater, runwayLowWater))
+  const fixedPromptTokens = Math.floor(
+    finiteInRange(params.fixedPromptTokens, 0, 0, Number.MAX_SAFE_INTEGER)
+  )
+  const summaryTokens = Math.floor(
+    finiteInRange(params.summaryTokens, 0, 0, Number.MAX_SAFE_INTEGER)
+  )
   const available = Math.max(
     0,
-    postCompactTarget -
-      Math.max(0, Math.floor(params.fixedPromptTokens)) -
-      Math.max(0, Math.floor(params.summaryTokens))
+    postCompactTarget - fixedPromptTokens - summaryTokens
   )
-  const tailCap = Math.max(
-    0,
-    Math.round(contextSize * Math.min(0.9, Math.max(0, params.maxTailFraction)))
-  )
+  const maxTailFraction = finiteInRange(params.maxTailFraction, 0, 0, 0.9)
+  const tailCap = Math.max(0, Math.round(contextSize * maxTailFraction))
   return Math.min(available, tailCap)
 }
 
