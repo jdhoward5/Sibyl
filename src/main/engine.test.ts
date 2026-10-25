@@ -452,6 +452,32 @@ describe('InferenceEngine lifecycle', () => {
     await expect(engine.load('model-a')).rejects.toThrow('shutting down')
   })
 
+  it('probes hardware without loading a model or allocating a sequence', async () => {
+    const engine = new InferenceEngine()
+    const hardware = await engine.hardware()
+    expect(hardware.gpuType).toBe(false)
+    expect(fakes.llama.loadModel).not.toHaveBeenCalled()
+    expect(fakes.sessions).toHaveLength(0)
+    await engine.shutdown()
+    await expect(engine.hardware()).rejects.toThrow('shutting down')
+  })
+
+  it('waits for a pending load before probing its backend without disposing the model', async () => {
+    const engine = new InferenceEngine()
+    const pending = deferred<ReturnType<typeof nativeModel>['value']>()
+    const loaded = nativeModel()
+    fakes.llama.loadModel.mockReturnValueOnce(pending.promise)
+    const loading = engine.load('model-a')
+    let measured = false
+    const reading = engine.hardware().then(() => { measured = true })
+    await vi.waitFor(() => expect(fakes.llama.loadModel).toHaveBeenCalled())
+    expect(measured).toBe(false)
+    pending.resolve(loaded.value)
+    await Promise.all([loading, reading])
+    expect(loaded.value.dispose).not.toHaveBeenCalled()
+    expect(loaded.context.getSequence).toHaveBeenCalledTimes(1)
+  })
+
   it('only aborts the operation matching its conversation and message', async () => {
     const first = nativeModel()
     fakes.llama.loadModel.mockResolvedValueOnce(first.value)

@@ -10,6 +10,7 @@ import type {
   EngineStatus,
   HFModelDetail,
   HFModelSummary,
+  HardwareInfo,
   InstalledModel,
   Persona,
   PersonaVoice,
@@ -112,6 +113,9 @@ export interface AppState {
   view: View
   settings: RendererSettings | null
   appInfo: AppInfo | null
+  hardware: HardwareInfo | null
+  hardwareLoading: boolean
+  hardwareError: string | null
   engine: EngineStatus
   conversations: Conversation[]
   activeConversationId: string | null
@@ -153,6 +157,9 @@ const initialState: AppState = {
   view: 'studio',
   settings: null,
   appInfo: null,
+  hardware: null,
+  hardwareLoading: false,
+  hardwareError: null,
   engine: {
     state: 'idle',
     modelId: null,
@@ -2870,6 +2877,22 @@ export const actions = {
   },
 
   // --- models -------------------------------------------------------------
+  async refreshHardware(): Promise<void> {
+    if (state.hardwareLoading) return
+    setState({ hardwareLoading: true, hardwareError: null })
+    try {
+      const res = await window.sibyl.app.hardware()
+      setState({
+        hardware: res.ok ? res.data ?? null : null,
+        hardwareError: res.ok ? null : 'Hardware information could not be refreshed. Try again.'
+      })
+    } catch {
+      setState({ hardware: null, hardwareError: 'Hardware information could not be refreshed. Try again.' })
+    } finally {
+      setState({ hardwareLoading: false })
+    }
+  },
+
   async loadModel(id: string): Promise<void> {
     const infoRes = await window.sibyl.app.info()
     if (infoRes.ok && infoRes.data) setState({ appInfo: infoRes.data })
@@ -2881,12 +2904,13 @@ export const actions = {
         model,
         contextSize: settings.load.contextSize,
         gpuLayers: settings.load.gpuLayers,
-        gpuEnabled: settings.gpu !== 'cpu' && settings.load.gpuLayers !== 0,
+        gpuEnabled: settings.gpu !== 'cpu' && state.engine.gpuType !== false && settings.load.gpuLayers !== 0,
         resources: {
           systemMemoryTotalBytes: appInfo.systemMemoryTotalBytes,
           systemMemoryFreeBytes: appInfo.systemMemoryFreeBytes,
           vramTotalBytes: state.engine.vramTotalBytes,
-          vramUsedBytes: state.engine.vramUsedBytes
+          vramUsedBytes: state.engine.vramUsedBytes,
+          unifiedMemory: state.hardware?.unifiedMemory ?? appInfo.platform === 'darwin'
         }
       })
       if (

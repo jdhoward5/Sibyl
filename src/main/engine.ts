@@ -38,6 +38,7 @@ import {
   parseDirectorOutput
 } from '@shared/sceneDirector'
 import { getLlamaInstance } from './llama'
+import { readHardware } from './hardware'
 import { getInstalledModel, getSettings, upsertInstalledModel } from './store'
 import { SerialQueue } from '@shared/serial'
 
@@ -167,6 +168,20 @@ export class InferenceEngine extends EventEmitter {
   private shutdownRequested = false
 
   // -- status ---------------------------------------------------------------
+
+  async hardware() {
+    return this.lifecycle.run(async () => {
+      if (this.shutdownRequested) throw new Error('The inference engine is shutting down.')
+      return readHardware(async () => {
+        // Reuse a loaded model's backend even if the next-load preference changed.
+        // With no model, probing initializes only the backend, never a context.
+        if (this.model && this.llama) return this.llama
+        const settings = await getSettings()
+        this.llama = await getLlamaInstance(settings.gpu)
+        return this.llama
+      })
+    })
+  }
 
   async status(): Promise<EngineStatus> {
     let vramTotal: number | null = null

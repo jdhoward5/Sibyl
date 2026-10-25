@@ -100,6 +100,7 @@ const bridge: SibylBridge = {
   },
   app: {
     info: () => ipcRenderer.invoke(IPC.appInfo),
+    hardware: () => ipcRenderer.invoke(IPC.appHardware),
     storageIssues: () => ipcRenderer.invoke(IPC.storageIssues),
     revealRecovery: (resource) => ipcRenderer.invoke(IPC.storageRevealRecovery, resource)
   },

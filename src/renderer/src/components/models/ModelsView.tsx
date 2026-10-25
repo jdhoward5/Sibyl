@@ -2,8 +2,10 @@ import { useState } from 'react'
 import { actions, useStore } from '../../store'
 import { formatBytes } from '@shared/format'
 import { CheckIcon, TrashIcon, FolderIcon, BoxIcon, PlusIcon } from '../../lib/icons'
-import { estimateModelFit } from '@shared/hardwareFit'
+import { useModelFit } from '../../lib/useModelFit'
+import { ModelFitHint } from './ModelFitHint'
 import { DiscoverView } from '../discover/DiscoverView'
+import { HardwarePanel } from './HardwarePanel'
 
 type ModelsTab = 'installed' | 'browse'
 
@@ -11,8 +13,7 @@ export function ModelsView() {
   const [tab, setTab] = useState<ModelsTab>('installed')
   const models = useStore((state) => state.installedModels)
   const engine = useStore((state) => state.engine)
-  const settings = useStore((state) => state.settings)
-  const appInfo = useStore((state) => state.appInfo)
+  const { fitFor, parameters } = useModelFit()
   const totalBytes = models.reduce((sum, model) => sum + model.sizeBytes, 0)
 
   return (
@@ -66,6 +67,7 @@ export function ModelsView() {
       ) : (
         <div className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-[920px] px-8 py-6">
+            <HardwarePanel />
             {models.length === 0 ? (
               <div className="empty-stage">
                 <BoxIcon size={34} className="text-sibyl-accent/70" />
@@ -101,22 +103,7 @@ export function ModelsView() {
                   ]
                     .filter(Boolean)
                     .join(' · ')
-                  const fit =
-                    settings && appInfo
-                      ? estimateModelFit({
-                          model,
-                          contextSize: settings.load.contextSize,
-                          gpuLayers: settings.load.gpuLayers,
-                          gpuEnabled:
-                            settings.gpu !== 'cpu' && settings.load.gpuLayers !== 0,
-                          resources: {
-                            systemMemoryTotalBytes: appInfo.systemMemoryTotalBytes,
-                            systemMemoryFreeBytes: appInfo.systemMemoryFreeBytes,
-                            vramTotalBytes: engine.vramTotalBytes,
-                            vramUsedBytes: engine.vramUsedBytes
-                          }
-                        })
-                      : null
+                  const fit = fitFor(model)
 
                   return (
                     <article
@@ -161,22 +148,7 @@ export function ModelsView() {
                         <div className="mt-1.5 truncate font-mono text-[10.5px] text-sibyl-muted">
                           {meta}
                         </div>
-                        {fit && (
-                          <div
-                            className={`mt-1 text-[11px] ${
-                              fit.severity === 'infeasible'
-                                ? 'text-red-300'
-                                : fit.severity === 'tight'
-                                  ? 'text-amber-300'
-                                  : 'text-sibyl-muted'
-                            }`}
-                            title={fit.details.join('\n')}
-                          >
-                            {fit.summary} · RAM {formatBytes(fit.estimatedRamBytes)}
-                            {fit.offloadFraction > 0 &&
-                              ` · VRAM ${formatBytes(fit.estimatedVramBytes)}`}
-                          </div>
-                        )}
+                        <ModelFitHint fit={fit} unified={parameters?.resources.unifiedMemory} />
                       </div>
                       {isLoaded ? (
                         <button onClick={() => void actions.unloadModel()} className="btn-surface h-[34px]">

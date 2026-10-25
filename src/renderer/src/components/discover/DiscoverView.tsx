@@ -3,6 +3,7 @@ import { actions, useStore, type SortKey } from '../../store'
 import { ModelCard } from './ModelCard'
 import { ModelDetailDrawer } from './ModelDetailDrawer'
 import { SearchIcon } from '../../lib/icons'
+import { HardwarePanel } from '../models/HardwarePanel'
 
 const sorts: { key: SortKey; label: string }[] = [
   { key: 'trending', label: 'Trending' },
@@ -56,6 +57,7 @@ export function DiscoverView({ embedded = false }: { embedded?: boolean }) {
       </div>
 
       <div className="flex-1 overflow-y-auto px-8 py-5">
+        <HardwarePanel />
         {error && (
           <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-[13px] text-red-200">
             {error}

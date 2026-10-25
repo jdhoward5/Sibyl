@@ -13,6 +13,7 @@ import type {
   GenerationOptions,
   HFModelDetail,
   HFModelSummary,
+  HardwareInfo,
   InstalledModel,
   PrivateVaultBackup,
   PrivateVaultStatus,
@@ -122,7 +123,8 @@ export const IPC = {
   updateEvent: 'update:event', // main → renderer status updates
 
   // Misc
-  appInfo: 'app:info'
+  appInfo: 'app:info',
+  appHardware: 'app:hardware'
 } as const
 
 export interface ChatSendRequest {
@@ -278,6 +280,7 @@ export interface SibylBridge {
   }
   app: {
     info(): Promise<Result<AppInfo>>
+    hardware(): Promise<Result<HardwareInfo>>
     storageIssues(): Promise<Result<StorageIssue[]>>
     revealRecovery(resource: StorageIssue['resource']): Promise<Result<void>>
   }

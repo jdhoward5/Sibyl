@@ -1,6 +1,9 @@
 import type { HFModelSummary } from '@shared/types'
 import { descriptorTags, isNsfwModel, parseParamLabel } from '@shared/format'
 import { DownloadIcon } from '../../lib/icons'
+import { searchModelSize } from '@shared/hardwareFit'
+import { useModelFit } from '../../lib/useModelFit'
+import { ModelFitHint } from '../models/ModelFitHint'
 
 function compact(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -12,6 +15,8 @@ export function ModelCard({ model, onClick }: { model: HFModelSummary; onClick: 
   const [author, name] = model.id.includes('/') ? model.id.split(/\/(.*)/s) : ['', model.id]
   const nsfw = isNsfwModel(model.tags)
   const param = parseParamLabel(name)
+  const { fitFor, parameters } = useModelFit()
+  const size = searchModelSize(name)
   return (
     <button
       onClick={onClick}
@@ -29,6 +34,8 @@ export function ModelCard({ model, onClick }: { model: HFModelSummary; onClick: 
           )}
         </div>
         <div className="mt-1 truncate text-[12.5px] text-sibyl-muted">{author}</div>
+        {size ? <ModelFitHint fit={fitFor(size)} preview unified={parameters?.resources.unifiedMemory} />
+          : <span className="mt-2 block text-[11px] text-sibyl-secondary">Fit unknown · Open to compare file sizes</span>}
         <div className="mt-2.5 flex flex-wrap gap-1.5">
           {nsfw && (
             <span className="rounded border border-rose-500/40 px-2 py-0.5 font-mono text-[11px] text-rose-300/90">18+</span>

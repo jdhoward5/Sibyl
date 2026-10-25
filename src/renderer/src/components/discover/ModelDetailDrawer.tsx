@@ -3,11 +3,14 @@ import { descriptorTags, formatBytes, isNsfwModel, parseParamLabel, quantRank } 
 import { canonicalGgufFilename, groupGgufFiles, type GgufDownloadGroup } from '@shared/modelFiles'
 import { XIcon, DownloadIcon, CheckIcon, HeartIcon, ExternalLinkIcon } from '../../lib/icons'
 import { useDialogFocus } from '../../lib/useDialogFocus'
+import { useModelFit } from '../../lib/useModelFit'
+import { ModelFitHint } from '../models/ModelFitHint'
+import { searchModelSize } from '@shared/hardwareFit'
 
 function recommendationFor(quant: string | undefined): string | null {
   if (!quant) return null
   const q = quant.toUpperCase()
-  if (q.includes('Q4_K_M')) return 'Recommended — best balance of quality and size'
+  if (q.includes('Q4_K_M')) return 'Balanced quality and download size'
   if (q === 'Q8_0' || q === 'F16' || q === 'BF16') return 'Highest quality, largest size'
   if (q.startsWith('IQ') || q.includes('Q2') || q.includes('Q3')) return 'Smallest, lower quality'
   return null
@@ -20,6 +23,7 @@ export function ModelDetailDrawer() {
   const dialogRef = useDialogFocus<HTMLDivElement>(close, loading || Boolean(detail))
   const downloads = useStore((s) => s.downloads)
   const installed = useStore((s) => s.installedModels)
+  const contextSize = useStore((s) => s.settings?.load.contextSize)
 
   if (!loading && !detail) return null
 
@@ -100,6 +104,10 @@ export function ModelDetailDrawer() {
               <h3 className="mb-3 text-[13px] font-semibold uppercase tracking-wide text-sibyl-muted">
                 Quantizations ({sortedFiles.length})
               </h3>
+              <p className="mb-4 text-[12px] leading-relaxed text-sibyl-secondary">
+                Fit estimates use each complete file’s size at {contextSize?.toLocaleString()} tokens of context,
+                with room reserved for the OS. Lower quantization or shorter context can help a model fit.
+              </p>
               {sortedFiles.length === 0 && (
                 <p className="text-[13px] text-sibyl-muted">
                   No GGUF quantizations found in this repo.
@@ -148,36 +156,53 @@ function FileRow({
   )
   const busy = dl && (dl.status === 'downloading' || dl.status === 'queued' || dl.status === 'verifying')
   const rec = recommendationFor(file.quant)
+  const { fitFor, parameters } = useModelFit()
+  const fit = fitFor({ sizeBytes: file.size ?? 0, paramLabel: (searchModelSize(file.rfilename) ?? searchModelSize(repoId.split('/').pop() ?? ''))?.paramLabel })
+  const suggested = file.complete && file.quant?.toUpperCase() === 'Q4_K_M' && fit?.severity === 'comfortable'
 
   return (
-    <div className="card flex items-center gap-3 p-3">
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="font-mono text-[12px] font-semibold text-sibyl-text">{file.quant ?? 'GGUF'}</span>
-          {file.multipart && <span className="chip">{file.shardCount} parts</span>}
+    <div className={`card p-3 ${suggested ? 'border-emerald-300/30' : ''}`}>
+      <div className="flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-[12px] font-semibold text-sibyl-text">{file.quant ?? 'GGUF'}</span>
+            {file.multipart && <span className="chip">{file.shardCount} parts</span>}
+          </div>
+          <div className="truncate text-[11px] text-sibyl-muted" title={file.rfilename}>
+            {file.rfilename}
+          </div>
+          {rec && <div className="mt-0.5 text-[11px] text-sibyl-secondary">{rec}</div>}
         </div>
-        <div className="truncate text-[11px] text-sibyl-muted" title={file.rfilename}>
-          {file.rfilename}
-        </div>
-        {rec && <div className="mt-0.5 text-[11px] text-sibyl-accent/90">{rec}</div>}
+        <span className="shrink-0 text-[12px] text-sibyl-muted">{file.size ? formatBytes(file.size) : ''}</span>
+        {isInstalled ? (
+          <span className="flex shrink-0 items-center gap-1 text-[12px] text-emerald-300">
+            <CheckIcon size={15} /> Installed
+          </span>
+        ) : busy ? (
+          <span className="shrink-0 text-[12px] text-sibyl-accent">Downloading…</span>
+        ) : !file.complete ? (
+          <span className="shrink-0 text-[12px] text-sibyl-muted">Missing parts</span>
+        ) : (
+          <button
+            onClick={() => actions.startDownload(repoId, file.rfilename)}
+            className="btn-primary h-8 shrink-0"
+          >
+            <DownloadIcon size={14} /> Get
+          </button>
+        )}
       </div>
-      <span className="shrink-0 text-[12px] text-sibyl-muted">{file.size ? formatBytes(file.size) : ''}</span>
-      {isInstalled ? (
-        <span className="flex shrink-0 items-center gap-1 text-[12px] text-emerald-300">
-          <CheckIcon size={15} /> Installed
-        </span>
-      ) : busy ? (
-        <span className="shrink-0 text-[12px] text-sibyl-accent">Downloading…</span>
-      ) : !file.complete ? (
-        <span className="shrink-0 text-[12px] text-sibyl-muted">Missing parts</span>
-      ) : (
-        <button
-          onClick={() => actions.startDownload(repoId, file.rfilename)}
-          className="btn-primary h-8 shrink-0"
-        >
-          <DownloadIcon size={14} /> Get
-        </button>
-      )}
+      {suggested && <div className="mt-2 text-[11px] font-medium text-emerald-200">Suggested for your hardware</div>}
+      {file.size ? (
+        <ModelFitHint fit={fit} unified={parameters?.resources.unifiedMemory} />
+      ) : <p className="mt-2 text-[11px] text-sibyl-secondary">Fit unknown · {file.complete ? 'File size unavailable' : 'Incomplete shard set'}</p>}
+      {fit && file.size ? (
+        <details className="mt-2 text-[11px] text-sibyl-secondary">
+          <summary className="w-fit cursor-pointer text-sibyl-text">Memory estimate details</summary>
+          <ul className="mt-2 space-y-1 pl-4 list-disc">
+            {fit.details.map((line) => <li key={line}>{line}</li>)}
+          </ul>
+        </details>
+      ) : null}
     </div>
   )
 }

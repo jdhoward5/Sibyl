@@ -520,6 +520,7 @@ export function registerIpc(policy: RendererUrlPolicy): void {
   })
 
   // --- App info -----------------------------------------------------------
+  handle(IPC.appHardware, policy, parseNoArgs, async () => engine.hardware())
   handle(IPC.appInfo, policy, parseNoArgs, async (): Promise<AppInfo> => {
     const settings = await getSettings()
     return {

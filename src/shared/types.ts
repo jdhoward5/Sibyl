@@ -577,6 +577,24 @@ export type RendererSettingsPatch = Partial<
   Omit<RendererSettings, 'hfTokenConfigured' | 'modelsDir'>
 >
 
+/** Local hardware snapshot; no identifiers, paths, or private application data. */
+export interface HardwareInfo {
+  cpuModel: string
+  logicalCores: number
+  platform: string
+  arch: string
+  osRelease: string
+  systemMemoryTotalBytes: number
+  systemMemoryFreeBytes: number
+  gpuType: 'cuda' | 'vulkan' | 'metal' | false | null
+  gpuNames: string[]
+  vramTotalBytes: number | null
+  vramUsedBytes: number | null
+  unifiedMemory: boolean
+  detectedAt: string
+  detectionError?: string
+}
+
 export interface EngineStatus {
   state: 'idle' | 'loading' | 'ready' | 'generating' | 'unloading' | 'shutting-down' | 'error'
   modelId: string | null

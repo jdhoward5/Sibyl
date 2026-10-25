@@ -194,8 +194,21 @@ async function run() {
     })
     assert(true, 'character list fields persist as normalized lines')
 
-    // Deterministic model fixtures keep discovery regressions off the network.
+    const hardwareResult = await page.evaluate(() => window.sibyl.app.hardware())
+    assert(hardwareResult.ok && hardwareResult.data?.systemMemoryTotalBytes > 0 &&
+      hardwareResult.data?.logicalCores > 0, 'real hardware probe works before any model is loaded')
+    assert(hardwareResult.data.gpuType !== null, 'hardware probe detects the real inference backend')
+
+    // Deterministic model and hardware fixtures keep fit regressions off the network.
     await app.evaluate(({ ipcMain }) => {
+      const gib = 1024 ** 3
+      ipcMain.removeHandler('app:hardware')
+      ipcMain.handle('app:hardware', () => ({ ok: true, data: {
+        cpuModel: 'Test processor', logicalCores: 16, platform: 'win32', arch: 'x64', osRelease: '10.0',
+        systemMemoryTotalBytes: 64 * gib, systemMemoryFreeBytes: 48 * gib,
+        gpuType: 'cuda', gpuNames: ['Test GPU'], vramTotalBytes: 24 * gib, vramUsedBytes: 2 * gib,
+        unifiedMemory: false, detectedAt: new Date().toISOString()
+      } }))
       const summary = {
         id: 'e2e/Multipart-Model', author: 'e2e', downloads: 1, likes: 0,
         lastModified: '2026-10-24T00:00:00.000Z', tags: ['gguf'], gated: false
@@ -204,11 +217,16 @@ async function run() {
         ...summary,
         ggufFiles: [
           { rfilename: 'Q4/model-00001-of-00002.gguf', size: 75, quant: 'Q4_K_M', multipart: true },
-          { rfilename: 'Q4/model-00002-of-00002.gguf', size: 25, quant: 'Q4_K_M', multipart: true }
+          { rfilename: 'Q4/model-00002-of-00002.gguf', size: 25, quant: 'Q4_K_M', multipart: true },
+          { rfilename: 'Model-8B-Q4_K_M.gguf', size: 5 * gib, quant: 'Q4_K_M', multipart: false },
+          { rfilename: 'Model-120B-Q8_0.gguf', size: 120 * gib, quant: 'Q8_0', multipart: false },
+          { rfilename: 'Model-unknown.gguf', quant: 'Q3_K_M', multipart: false }
         ]
       }
       ipcMain.removeHandler('hf:search')
-      ipcMain.handle('hf:search', () => ({ ok: true, data: [summary] }))
+      ipcMain.handle('hf:search', () => ({ ok: true, data: [summary,
+        { ...summary, id: 'e2e/Model-8B-GGUF' }, { ...summary, id: 'e2e/Model-120B-GGUF' }
+      ] }))
       ipcMain.removeHandler('hf:modelDetail')
       let first = true
       ipcMain.handle('hf:modelDetail', () => {
@@ -221,12 +239,21 @@ async function run() {
     })
     await page.getByRole('button', { name: 'Models', exact: true }).click()
     await page.getByText('On this machine', { exact: true }).waitFor()
+    await page.getByText('Test processor', { exact: true }).waitFor()
     await assertAccessible('Installed models')
     await page.getByRole('button', { name: 'Browse', exact: true }).click()
     await page.getByText('Browse models', { exact: true }).waitFor()
     await page.getByPlaceholder('Search models — e.g. roleplay, Llama, Qwen…').waitFor()
-    await shot('01-models.png')
+    await page.getByRole('button').filter({ has: page.getByText('Model-8B-GGUF', { exact: true }) })
+      .getByText('Likely fits', { exact: true }).waitFor()
+    await page.getByRole('button').filter({ has: page.getByText('Model-120B-GGUF', { exact: true }) })
+      .getByText('Over budget', { exact: true }).waitFor()
+    await page.getByText('Hardware details & estimate assumptions', { exact: true }).click()
+    await page.getByText('Windows · x64 · kernel 10.0', { exact: true }).waitFor()
     await assertAccessible('Model browser')
+    await shot('01-hardware-details.png')
+    await page.getByText('Hardware details & estimate assumptions', { exact: true }).click()
+    await shot('01-models.png')
     await page.getByText('Multipart-Model', { exact: true }).click()
     await page.getByRole('dialog', { name: 'Loading model details' }).waitFor()
     await page.getByRole('dialog').press('Escape')
@@ -240,10 +267,18 @@ async function run() {
     await page.getByText('Multipart-Model', { exact: true }).click()
     const modelDrawer = page.getByRole('dialog')
     await modelDrawer.getByText('2 parts', { exact: true }).waitFor()
-    assert(await modelDrawer.getByRole('button', { name: 'Get', exact: true }).count() === 1,
+    assert(await modelDrawer.locator('.card').filter({ hasText: '2 parts' })
+      .getByRole('button', { name: 'Get', exact: true }).count() === 1,
       'multipart GGUF presents one download for all shards')
     assert(await modelDrawer.getByText('100 B', { exact: true }).count() === 1,
       'multipart GGUF displays the combined download size')
+    await modelDrawer.locator('.card').filter({ hasText: 'Model-8B-Q4_K_M.gguf' })
+      .getByText('Suggested for your hardware', { exact: true }).waitFor()
+    await modelDrawer.locator('.card').filter({ hasText: 'Model-120B-Q8_0.gguf' })
+      .getByText('Over budget', { exact: true }).waitFor()
+    await modelDrawer.getByText('Fit unknown · File size unavailable', { exact: true }).waitFor()
+    await assertAccessible('Model fit details', '[role="dialog"]')
+    await shot('01-model-fit.png')
     await modelDrawer.press('Escape')
     await page.getByRole('button', { name: 'Studio', exact: true }).click()
     await page.getByText('Alpha chat about pelicans', { exact: true }).first().waitFor()
