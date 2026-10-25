@@ -309,13 +309,13 @@ locally via `node-llama-cpp`. Stack: electron-vite + React + TS + Tailwind.
 - **Never run `npm audit fix --force`** here — it blindly bumps Electron/Vite/
   electron-vite across breaking majors and still doesn't resolve the findings.
 - The shipping tree is what matters: `npm audit --omit=dev` must be **0**.
-- Residual `npm audit` (full) findings are all **dev/build-time only** (vite,
-  electron-vite, @vitejs/plugin-react, esbuild) and don't ship. The root is
-  **esbuild**, whose advisory range currently covers every released version, so
-  there is *no* version to upgrade to — it can't be driven to 0 without removing
-  the Vite toolchain. They're also not triggered by our usage (`vitest run`, not
-  `--ui`; no exposed dev server). Leave them; re-check when esbuild ships a fix.
+- Both production and full `npm audit` are **0** after the October 2026 refresh.
+  Targeted overrides keep `adm-zip` at 0.6.1, `nanoid` at 5.1.16, `simple-git`
+  at 4.0.2, and `postcss-selector-parser` at 7.1.6 without forcing unrelated
+  framework upgrades. Preserve the simple-git packaged-ESM compatibility patch
+  when updating it; the release preflight checks its installed source.
 - Keep **Electron on a supported major** (latest 3) — that's the only finding
-  that affects the shipped runtime. After an in-place Electron major bump, if
-  dev fails with "Electron uninstall", run `node node_modules/electron/install.js`
-  to fetch the binary.
+  in the development dependency tree that ships as the app runtime. Electron is
+  pinned to 45.0.0; update the release preflight pin with it. After an in-place
+  major bump, if the binary is absent, run `node node_modules/electron/install.js`
+  to fetch it. `postinstall` fails closed if a required source patch cannot apply.

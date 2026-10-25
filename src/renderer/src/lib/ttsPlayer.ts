@@ -14,7 +14,7 @@ interface PlayerCallbacks {
   onSpeakingChange: (messageId: string | null) => void
 }
 
-class TtsPlayer {
+export class TtsPlayer {
   private ctx: AudioContext | null = null
   private gain: GainNode | null = null
   private volume = 1
@@ -24,6 +24,9 @@ class TtsPlayer {
   // The request whose audio we are currently scheduling. Chunks from any other
   // (superseded) request are ignored.
   private requestId: string | null = null
+  private expectedMessageId: string | null = null
+  private preparedVersion = 0
+  private playingVersion = 0
   private messageId: string | null = null
   private nextStartTime = 0
   private pending = 0
@@ -50,6 +53,13 @@ class TtsPlayer {
     if (this.ctx.state === 'suspended') void this.ctx.resume()
   }
 
+  /** Arm playback for an explicit speech request; its start replaces prior audio. */
+  prepareForSpeech(messageId: string): void {
+    this.ensureContext()
+    this.expectedMessageId = messageId
+    this.preparedVersion += 1
+  }
+
   setVolume(volume: number): void {
     this.volume = Math.max(0, Math.min(1, volume))
     if (this.gain) this.gain.gain.value = this.volume
@@ -65,6 +75,9 @@ class TtsPlayer {
   handleEvent(e: TtsEvent): void {
     switch (e.type) {
       case 'start':
+        // Stop can race an IPC event that main already sent. Only a new local
+        // speech request may re-arm playback after stop; context prewarming may not.
+        if (e.messageId !== this.expectedMessageId) return
         this.beginRequest(e.requestId, e.messageId)
         break
       case 'chunk':
@@ -88,6 +101,7 @@ class TtsPlayer {
     this.clearSources()
     this.ensureContext()
     this.requestId = requestId
+    this.playingVersion = this.preparedVersion
     this.messageId = messageId
     this.doneReceived = false
     this.pending = 0
@@ -123,6 +137,7 @@ class TtsPlayer {
   private maybeFinish(): void {
     if (this.doneReceived && this.pending <= 0) {
       this.requestId = null
+      if (this.playingVersion === this.preparedVersion) this.expectedMessageId = null
       this.messageId = null
       this.callbacks?.onSpeakingChange(null)
     }
@@ -132,6 +147,7 @@ class TtsPlayer {
   stop(): void {
     this.clearSources()
     this.requestId = null
+    this.expectedMessageId = null
     if (this.messageId !== null) {
       this.messageId = null
       this.callbacks?.onSpeakingChange(null)

@@ -66,9 +66,10 @@ if (status) {
 for (const [name, expected] of [
   ['node-llama-cpp', '3.18.1'],
   ['hash-wasm', '4.12.0'],
-  ['electron', '42.4.1']
+  ['electron', '45.0.0'],
+  ['simple-git', '4.0.2']
 ]) {
-  const declared = pkg.dependencies?.[name] ?? pkg.devDependencies?.[name]
+  const declared = pkg.dependencies?.[name] ?? pkg.devDependencies?.[name] ?? pkg.overrides?.[name]
   const installed = JSON.parse(
     readFileSync(path.join(root, 'node_modules', name, 'package.json'), 'utf8')
   ).version
@@ -82,19 +83,19 @@ for (const [name, expected] of [
 
 for (const patch of [
   'node-llama-cpp+3.18.1.patch',
-  'simple-git+3.36.0.patch'
+  'simple-git+4.0.2.patch'
 ]) {
   if (!existsSync(path.join(root, 'patches', patch))) {
     throw new Error(`Required patch is missing: patches/${patch}`)
   }
 }
 const simpleGitSource = readFileSync(
-  path.join(root, 'node_modules', 'simple-git', 'dist', 'esm', 'index.js'),
+  path.join(root, 'node_modules', 'simple-git', 'dist', 'index.mjs'),
   'utf8'
 )
 if (
   !simpleGitSource.includes('import fileExists from "@kwsites/file-exists"') ||
-  !simpleGitSource.includes('const { exists, FOLDER } = fileExists')
+  !simpleGitSource.includes('const { exists: ke, FOLDER: _e } = fileExists')
 ) {
   throw new Error('The simple-git packaged-ESM compatibility patch is not applied.')
 }
@@ -219,11 +220,12 @@ const report = {
   dependencies: {
     'node-llama-cpp': '3.18.1',
     'hash-wasm': '4.12.0',
-    electron: '42.4.1'
+    electron: '45.0.0',
+    'simple-git': '4.0.2'
   },
   patches: [
     'patches/node-llama-cpp+3.18.1.patch',
-    'patches/simple-git+3.36.0.patch'
+    'patches/simple-git+4.0.2.patch'
   ],
   backend: {
     repository: sourceInfo.llamaCppGithubRepo,

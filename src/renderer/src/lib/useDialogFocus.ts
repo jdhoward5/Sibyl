@@ -1,8 +1,8 @@
 import { useEffect, useRef, type RefObject } from 'react'
 
 const FOCUSABLE =
-  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), ' +
-  'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), ' +
+  'textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
 
 /**
  * Native-feeling modal focus management for Electron drawers: initial focus,

@@ -194,6 +194,31 @@ async function run() {
     })
     assert(true, 'character list fields persist as normalized lines')
 
+    // Deterministic model fixtures keep discovery regressions off the network.
+    await app.evaluate(({ ipcMain }) => {
+      const summary = {
+        id: 'e2e/Multipart-Model', author: 'e2e', downloads: 1, likes: 0,
+        lastModified: '2026-10-24T00:00:00.000Z', tags: ['gguf'], gated: false
+      }
+      const detail = {
+        ...summary,
+        ggufFiles: [
+          { rfilename: 'Q4/model-00001-of-00002.gguf', size: 75, quant: 'Q4_K_M', multipart: true },
+          { rfilename: 'Q4/model-00002-of-00002.gguf', size: 25, quant: 'Q4_K_M', multipart: true }
+        ]
+      }
+      ipcMain.removeHandler('hf:search')
+      ipcMain.handle('hf:search', () => ({ ok: true, data: [summary] }))
+      ipcMain.removeHandler('hf:modelDetail')
+      let first = true
+      ipcMain.handle('hf:modelDetail', () => {
+        if (!first) return { ok: true, data: detail }
+        first = false
+        return new Promise((resolve) => {
+          globalThis.sibylE2eResolveDetail = () => resolve({ ok: true, data: detail })
+        })
+      })
+    })
     await page.getByRole('button', { name: 'Models', exact: true }).click()
     await page.getByText('On this machine', { exact: true }).waitFor()
     await assertAccessible('Installed models')
@@ -202,8 +227,45 @@ async function run() {
     await page.getByPlaceholder('Search models — e.g. roleplay, Llama, Qwen…').waitFor()
     await shot('01-models.png')
     await assertAccessible('Model browser')
+    await page.getByText('Multipart-Model', { exact: true }).click()
+    await page.getByRole('dialog', { name: 'Loading model details' }).waitFor()
+    await page.getByRole('dialog').press('Escape')
+    await page.getByRole('dialog').waitFor({ state: 'hidden' })
+    await app.evaluate(() => {
+      globalThis.sibylE2eResolveDetail()
+      delete globalThis.sibylE2eResolveDetail
+    })
+    await page.waitForTimeout(100)
+    assert(await page.getByRole('dialog').count() === 0, 'dismissed model details stay closed after their response arrives')
+    await page.getByText('Multipart-Model', { exact: true }).click()
+    const modelDrawer = page.getByRole('dialog')
+    await modelDrawer.getByText('2 parts', { exact: true }).waitFor()
+    assert(await modelDrawer.getByRole('button', { name: 'Get', exact: true }).count() === 1,
+      'multipart GGUF presents one download for all shards')
+    assert(await modelDrawer.getByText('100 B', { exact: true }).count() === 1,
+      'multipart GGUF displays the combined download size')
+    await modelDrawer.press('Escape')
     await page.getByRole('button', { name: 'Studio', exact: true }).click()
     await page.getByText('Alpha chat about pelicans', { exact: true }).first().waitFor()
+    await page.getByTitle('Add a character', { exact: true }).click()
+    await page.getByPlaceholder('Character name').fill('Applied character')
+    await page.getByRole('button', { name: 'Apply', exact: true }).click()
+    await page.getByRole('dialog').waitFor({ state: 'hidden' })
+    await page.waitForFunction(async () => {
+      const result = await window.sibyl.conversations.get('e2e-alpha')
+      return result.data?.personaSnapshot?.persona.name === 'Applied character'
+    })
+    assert(true, 'Apply saves and attaches a newly created character')
+    await page.getByTitle('Edit character', { exact: true }).click()
+    await page.getByPlaceholder('Character name').fill('Updated character')
+    await page.getByRole('button', { name: 'Apply', exact: true }).click()
+    await page.getByRole('dialog').waitFor({ state: 'hidden' })
+    await page.waitForFunction(async () => {
+      const result = await window.sibyl.conversations.get('e2e-alpha')
+      return result.data?.personaSnapshot?.persona.name === 'Updated character' &&
+        result.data.personaSnapshot.persona.version === 2
+    })
+    assert(true, 'Apply snapshots the saved character edits and incremented version')
     assert(!fs.existsSync(path.join(userDataDir, 'settings.json')), 'legacy plaintext settings removed')
     assert(!fs.existsSync(path.join(userDataDir, 'conversations')), 'legacy plaintext conversations removed')
     const plaintextOffenders = []
@@ -330,6 +392,11 @@ async function run() {
           brief: 'You are Bo.',
           avatar: { monogram: 'BO', gradient: ['#78350f', '#f59e0b'] },
           voiceTags: []
+        },
+        {
+          schemaVersion: 2, version: 1, id: 'e2e-cy', name: 'Cy', role: 'Navigator',
+          brief: 'You are Cy.', avatar: { monogram: 'CY', gradient: ['#334155', '#6366f1'] },
+          voiceTags: []
         }
       ]
       await window.sibyl.settings.set({ personas: [...(current.data?.personas ?? []), ...personas] })
@@ -363,6 +430,11 @@ async function run() {
             createdAt: '2026-03-01T00:00:02.000Z',
             director: true,
             directionId: 'e2e-direction'
+          },
+          {
+            id: 'e2e-scoped-note', role: 'user', content: 'Check the compass.',
+            createdAt: '2026-03-01T00:00:03.000Z', director: true,
+            directionId: 'e2e-scoped-direction'
           }
         ],
         cast: personas.map((persona) => persona.id),
@@ -376,6 +448,11 @@ async function run() {
             scope: 'persistent',
             enabled: true,
             createdAt: '2026-03-01T00:00:02.000Z'
+          },
+          {
+            id: 'e2e-scoped-direction', content: 'Check the compass.',
+            target: { kind: 'speaker', speakerId: 'e2e-cy' }, scope: 'persistent',
+            enabled: true, createdAt: '2026-03-01T00:00:03.000Z'
           }
         ]
       })
@@ -421,7 +498,18 @@ async function run() {
       'optional deterministic scene-director settings persisted'
     )
     assert(savedScene?.data?.schemaVersion === 2, 'legacy scene migrated to conversation schema v2')
-    assert(savedScene?.data?.castSnapshots?.length === 2, 'scene persisted two persona snapshots')
+    assert(savedScene?.data?.castSnapshots?.length === 3, 'scene persisted three persona snapshots')
+    const cyChip = page.getByTitle('Cy speaks next').locator('..')
+    await cyChip.hover()
+    await cyChip.getByTitle('Remove from scene').click()
+    await page.waitForFunction(async () => {
+      const result = await window.sibyl.conversations.get('e2e-scene')
+      const direction = result.data?.directions?.find((item) => item.id === 'e2e-scoped-direction')
+      return result.ok && result.data.cast.length === 2 && direction?.enabled === false &&
+        Boolean(direction.resolvedAt) && direction.target.speakerId === 'e2e-cy' &&
+        result.data.messages.some((message) => message.id === 'e2e-scoped-note')
+    })
+    assert(true, 'cast removal persists while preserving retired direction targets and notes')
     assert(
       savedScene?.data?.roleplayState?.schemaVersion === 1,
       'scene persisted validated structured continuity state'

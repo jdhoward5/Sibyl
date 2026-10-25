@@ -4,12 +4,15 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 import type { DownloadProgress, InstalledModel } from '@shared/types'
 import { formatBytes, modelIdFor, parseParamLabel, parseQuant } from '@shared/format'
+import { canonicalGgufFilename, ggufShardFilenames } from '@shared/modelFiles'
+import { SerialQueue } from '@shared/serial'
 import { getRepoGgufFiles, type RepoFileInfo } from './hf'
 import { nlc } from './llama'
 import {
   getInstalledModel,
   getModelsDir,
   getSettings,
+  listInstalledModels,
   removeInstalledModel,
   upsertInstalledModel
 } from './store'
@@ -17,6 +20,11 @@ import {
 /** Escape a string for safe interpolation into a RegExp. */
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function modelGroupPath(file: string): string {
+  const resolved = canonicalGgufFilename(path.resolve(file))
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
 }
 
 /** Resolve one GGUF path to its exact multipart shard group, if applicable. */
@@ -102,6 +110,7 @@ export class DownloadManager extends EventEmitter {
   }
 
   async start(repoId: string, filename: string): Promise<{ id: string }> {
+    filename = canonicalGgufFilename(filename)
     const id = modelIdFor(repoId, filename)
     if (this.active.has(id)) return { id }
 
@@ -153,10 +162,12 @@ export class DownloadManager extends EventEmitter {
         getSettings(),
         getRepoGgufFiles(repoId)
       ])
+      entry.controller.signal.throwIfAborted()
       entry.verifyChecksum = settings.verifyDownloads
       // Pre-flight: refuse before writing anything if the volume lacks room, so the
       // user gets a clear message instead of an ENOSPC failure partway through.
       await this.ensureDiskSpace(modelsDir, fileInfo, filename)
+      entry.controller.signal.throwIfAborted()
 
       entry.progress.status = 'downloading'
       this.emitProgress(entry)
@@ -173,32 +184,41 @@ export class DownloadManager extends EventEmitter {
       })
 
       const modelPath = await downloader.download({ signal: entry.controller.signal })
+      entry.controller.signal.throwIfAborted()
 
       entry.progress.status = 'verifying'
       this.emitProgress(entry)
 
       const finalPath = modelPath ?? path.join(modelsDir, filename)
       // Confirm the bytes that landed on disk match what we expected to fetch,
-      // then (if enabled) that their SHA-256 matches HF's published checksum. A
-      // truncated/corrupt file is deleted and surfaced as an error rather than
-      // being registered as a usable model (it would only fail later at load
-      // time with a cryptic "unknown model architecture"-style message).
-      const expectedChecksums = new Map<string, string>()
-      for (const [name, info] of fileInfo) {
-        if (info.sha256) expectedChecksums.set(name, info.sha256)
+      // then (if enabled) that their SHA-256 matches HF's published checksum.
+      // A failed check rejects the download. Cleanup removes only unregistered
+      // files: skipExisting may have reused a model already in the library.
+      // The downloader prefixes local names with the HF repository identity.
+      // Match the remote and local shard lists by position, never by basename.
+      const remoteFiles = ggufShardFilenames(filename)
+      const localFiles = ggufShardFilenames(finalPath)
+      if (remoteFiles.length !== localFiles.length) {
+        const cleanup = await this.cleanupRejectedDownload(finalPath)
+        throw new Error(`The downloaded GGUF shard group does not match the requested model. ${cleanup}`)
       }
+      const expectedFiles = remoteFiles.map((remote, index) => ({
+        path: localFiles[index],
+        info: fileInfo.get(remote)
+      }))
       const { verified, verifiedBy, actualBytes } = await this.verifyIntegrity(
         entry,
         finalPath,
-        entry.progress.totalBytes,
-        expectedChecksums
+        this.expectedBytesFor(fileInfo, filename) || entry.progress.totalBytes,
+        expectedFiles
       )
+      entry.controller.signal.throwIfAborted()
       try {
         await this.register(repoId, filename, finalPath, actualBytes, verified, verifiedBy)
       } catch (err) {
-        // Registry write failed (disk full / perms): don't leave a downloaded but
-        // unregistered file the UI can never see. Remove it so a retry starts clean.
-        await this.deleteModelFiles(finalPath)
+        // Remove a new unregistered download, but retain files reused by an
+        // existing library entry (including legacy shard aliases/local imports).
+        await this.cleanupRejectedDownload(finalPath)
         throw err
       }
 
@@ -266,36 +286,41 @@ export class DownloadManager extends EventEmitter {
    * Verify a finished download: first that on-disk bytes match the expected total
    * (the size the downloader reported), then — when enabled and HF published
    * checksums for every file — that each file's SHA-256 matches. Returns the
-   * measured byte total and how it was verified. Throws — after deleting the bad
-   * file(s) so a retry starts clean — on missing/empty, size mismatch, or
-   * checksum mismatch.
+   * measured byte total and how it was verified. Rejects missing/empty files,
+   * size mismatches, and checksum mismatches; preserves existing library files.
    */
   private async verifyIntegrity(
     entry: ActiveDownload,
     finalPath: string,
     expectedBytes: number,
-    expectedChecksums: Map<string, string>
+    expectedFiles: { path: string; info: RepoFileInfo | undefined }[]
   ): Promise<{ verified: boolean; verifiedBy?: 'size' | 'sha256'; actualBytes: number }> {
-    const actualBytes = await this.bytesOnDisk(finalPath)
-    if (actualBytes === 0) {
-      await this.deleteModelFiles(finalPath)
-      throw new Error('Downloaded file is missing or empty — please retry the download.')
+    let actualBytes = 0
+    for (const file of expectedFiles) {
+      const size = await fs.stat(file.path).then((stat) => stat.size).catch(() => 0)
+      if (!size || (file.info?.size && size !== file.info.size)) {
+        const cleanup = await this.cleanupRejectedDownload(finalPath)
+        throw new Error(`Downloaded GGUF file is missing, empty, or has the wrong size. ${cleanup}`)
+      }
+      actualBytes += size
     }
     if (expectedBytes > 0 && actualBytes !== expectedBytes) {
-      await this.deleteModelFiles(finalPath)
+      const cleanup = await this.cleanupRejectedDownload(finalPath)
       throw new Error(
         `Download verification failed: expected ${expectedBytes.toLocaleString()} bytes ` +
-          `but found ${actualBytes.toLocaleString()}. The file is incomplete or corrupt — ` +
-          'please retry the download.'
+          `but found ${actualBytes.toLocaleString()}. ${cleanup}`
       )
     }
 
     // Stronger check: SHA-256 every file against HF's published checksum, but
     // only when we have a checksum for *every* file (else fall back to size).
-    if (entry.verifyChecksum && expectedChecksums.size > 0) {
-      const files = await this.shardFilesFor(finalPath)
-      if (files.every((f) => expectedChecksums.has(path.basename(f)))) {
-        await this.verifyChecksums(entry, finalPath, files, actualBytes, expectedChecksums)
+    if (entry.verifyChecksum) {
+      const checksums = new Map<string, string>()
+      for (const file of expectedFiles) {
+        if (file.info?.sha256) checksums.set(file.path, file.info.sha256)
+      }
+      if (checksums.size === expectedFiles.length) {
+        await this.verifyChecksums(entry, finalPath, [...checksums.keys()], actualBytes, checksums)
         return { verified: true, verifiedBy: 'sha256', actualBytes }
       }
     }
@@ -306,7 +331,7 @@ export class DownloadManager extends EventEmitter {
 
   /**
    * Hash each file against its expected SHA-256, streaming progress into
-   * `verifyFraction`. Deletes all files and throws on the first mismatch.
+   * `verifyFraction`. Rejects the first mismatch and cleans up unregistered files.
    */
   private async verifyChecksums(
     entry: ActiveDownload,
@@ -321,7 +346,7 @@ export class DownloadManager extends EventEmitter {
     this.emitProgress(entry)
 
     for (const file of files) {
-      const want = expected.get(path.basename(file))
+      const want = expected.get(file)
       const { hex, bytes } = await sha256File(file, entry.controller.signal, (fileHashed) => {
         const frac = totalBytes > 0 ? (hashedBefore + fileHashed) / totalBytes : 0
         entry.progress.verifyFraction = Math.min(1, frac)
@@ -333,10 +358,10 @@ export class DownloadManager extends EventEmitter {
       })
       hashedBefore += bytes
       if (want && hex !== want) {
-        await this.deleteModelFiles(finalPath)
+        const cleanup = await this.cleanupRejectedDownload(finalPath)
         throw new Error(
-          `Checksum verification failed for ${path.basename(file)} — the downloaded file is ` +
-            'corrupt. It has been removed; please retry the download.'
+          `Checksum verification failed for ${path.basename(file)}: the file does not match ` +
+            `Hugging Face's published checksum. ${cleanup}`
         )
       }
     }
@@ -377,17 +402,8 @@ export class DownloadManager extends EventEmitter {
 
   /** Expected total download size: the file, or the sum of all shards if multi-part. */
   private expectedBytesFor(fileInfo: Map<string, RepoFileInfo>, filename: string): number {
-    const base = filename.split('/').pop() ?? filename
-    const m = base.match(/^(.*)-\d{5}-of-(\d{5})\.gguf$/i)
-    if (m) {
-      const re = new RegExp(`^${escapeRegExp(m[1])}-\\d{5}-of-${m[2]}\\.gguf$`, 'i')
-      let total = 0
-      for (const [name, info] of fileInfo) {
-        if (re.test(name)) total += info.size
-      }
-      return total
-    }
-    return fileInfo.get(base)?.size ?? 0
+    const sizes = ggufShardFilenames(filename).map((name) => fileInfo.get(name)?.size ?? 0)
+    return sizes.every((size) => size > 0) ? sizes.reduce((sum, size) => sum + size, 0) : 0
   }
 
   /**
@@ -398,27 +414,22 @@ export class DownloadManager extends EventEmitter {
     return resolveModelShardFiles(finalPath)
   }
 
-  /** Total size of a model's file(s) on disk; 0 if none can be stat'd. */
-  private async bytesOnDisk(finalPath: string): Promise<number> {
-    let sum = 0
-    for (const f of await this.shardFilesFor(finalPath)) {
-      try {
-        sum += (await fs.stat(f)).size
-      } catch {
-        /* missing shard contributes 0 */
-      }
+  /** A failed download may have reused registered files via skipExisting. */
+  private async cleanupRejectedDownload(finalPath: string): Promise<string> {
+    const models = await listInstalledModels().catch(() => null)
+    if (!models) return 'Existing files were preserved because the library could not be checked.'
+    if (models.some((model) => modelGroupPath(model.path) === modelGroupPath(finalPath))) {
+      return 'Existing library files were preserved; this download was not registered.'
     }
-    return sum
-  }
-
-  /** Remove a model's file(s) from disk (used when a download fails verification). */
-  private async deleteModelFiles(finalPath: string): Promise<void> {
     const files = await this.shardFilesFor(finalPath)
-    await Promise.all(files.map((f) => fs.rm(f, { force: true }).catch(() => {})))
+    const removed = await Promise.allSettled(files.map((file) => fs.rm(file, { force: true })))
+    return removed.every((result) => result.status === 'fulfilled')
+      ? 'The unregistered download was removed; please retry the download.'
+      : 'Some downloaded files could not be removed; check the models folder before retrying.'
   }
 
   cancel(id: string): boolean {
-    const entry = this.active.get(id)
+    const entry = this.active.get(canonicalGgufFilename(id))
     if (!entry) return false
     entry.controller.abort()
     return true
@@ -426,6 +437,7 @@ export class DownloadManager extends EventEmitter {
 }
 
 export const downloadManager = new DownloadManager()
+const modelDeletionQueue = new SerialQueue()
 
 /**
  * Remove a library entry and, only for Sibyl-owned downloads, every file in its
@@ -433,9 +445,22 @@ export const downloadManager = new DownloadManager()
  * entry is retained so the user can retry.
  */
 export async function deleteInstalledModel(id: string): Promise<void> {
+  return modelDeletionQueue.run(() => deleteModelEntry(id))
+}
+
+async function deleteModelEntry(id: string): Promise<void> {
   const model = await getInstalledModel(id)
   if (!model) return
   if (model.local) {
+    await removeInstalledModel(id)
+    return
+  }
+
+  // Older versions could register each shard under a distinct id even though
+  // every entry loads the same group. Preserve files still referenced by any
+  // other entry (including a local import); no migration rewrites saved ids.
+  const sharedPath = modelGroupPath(model.path)
+  if ((await listInstalledModels()).some((other) => other.id !== id && modelGroupPath(other.path) === sharedPath)) {
     await removeInstalledModel(id)
     return
   }

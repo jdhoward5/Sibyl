@@ -342,6 +342,8 @@ let pendingTextSettings: RendererSettingsPatch | null = null
 let settingsTextTimer: ReturnType<typeof setTimeout> | null = null
 let accessibilitySettingsQueue: Promise<void> = Promise.resolve()
 let ttsSettingsQueue: Promise<void> = Promise.resolve()
+let discoverSearchRequest = 0
+let discoverDetailRequest = 0
 
 function mergeSettingsPatch(
   current: RendererSettings,
@@ -367,7 +369,10 @@ async function flushPendingTextSettings(): Promise<boolean> {
   const patch = pendingTextSettings
   pendingTextSettings = null
   if (!patch) return true
-  const res = await window.sibyl.settings.set(patch)
+  const res = await safeIpc(
+    () => window.sibyl.settings.set(patch),
+    'Settings persistence became unavailable.'
+  )
   if (res.ok && res.data) {
     confirmedSettings = res.data
     setState({ settings: res.data })
@@ -1850,7 +1855,7 @@ export const actions = {
       actions.continueSceneMuted()
       return
     }
-    const readiness = ttsReadiness()
+    const readiness = ttsReadiness(messageId)
     if (!readiness.ok) {
       toast(readiness.reason, 'error')
       return
@@ -1861,9 +1866,15 @@ export const actions = {
     if (operationId && state.turnOperation.messageId === messageId) {
       transitionTurn(operationId, { phase: 'narration-pending', error: undefined })
     }
-    ttsPlayer.ensureContext()
+    if (readiness.assignment) announceVoiceFallback(readiness.assignment)
+    ttsPlayer.prepareForSpeech(messageId)
     void safeIpc(
-      () => window.sibyl.tts.speak({ messageId, text: message.content }),
+      () => window.sibyl.tts.speak({
+        messageId,
+        text: message.content,
+        voiceId: readiness.voiceId,
+        rate: readiness.rate
+      }),
       'Speech became unavailable.'
     ).then((res) => {
       if (!res.ok) {
@@ -1924,7 +1935,7 @@ export const actions = {
   },
 
   /** Remove a persona from the active scene's cast (keeping the ≥2 minimum). */
-  removeCastMember(personaId: string): void {
+  async removeCastMember(personaId: string): Promise<void> {
     const conv = activeConversation()
     if (!conv?.cast) return
     if (conv.cast.length <= MIN_SCENE_CAST) {
@@ -1932,6 +1943,7 @@ export const actions = {
       return
     }
     const cast = conv.cast.filter((id) => id !== personaId)
+    const removedAt = now()
     const updated = {
       ...conv,
       cast,
@@ -1941,10 +1953,29 @@ export const actions = {
       personaOverrides: conv.personaOverrides?.filter(
         (override) => override.personaId !== personaId
       ),
-      updatedAt: now()
+      // Preserve the original target and linked note as history, but retire its
+      // guidance so removing a speaker never broadens it to the remaining cast.
+      directions: conv.directions?.map((direction) =>
+        direction.target.kind === 'speaker' && direction.target.speakerId === personaId
+          ? { ...direction, enabled: false, resolvedAt: direction.resolvedAt ?? removedAt }
+          : direction
+      ),
+      updatedAt: removedAt
     }
+    const wasUnsaved = state.unsavedConversationIds.includes(conv.id)
     updateConversation(conv.id, () => updated)
-    persist(updated)
+    if (!(await persist(updated))) {
+      if (state.conversations.find((item) => item.id === conv.id) === updated) {
+        rollbackOptimisticConversation(conv)
+        if (!wasUnsaved) {
+          setState((s) => ({
+            unsavedConversationIds: s.unsavedConversationIds.filter((id) => id !== conv.id)
+          }))
+        }
+        toast('The character could not be removed. The scene was kept unchanged.', 'error')
+      }
+      return
+    }
     void window.sibyl.chat.invalidateSession(conv.id)
     void actions.refreshContextUsage()
   },
@@ -1983,7 +2014,7 @@ export const actions = {
 
   // --- personas -----------------------------------------------------------
   /** Create or update a persona in the library. */
-  savePersona(persona: Persona): void {
+  async savePersona(persona: Persona, applyToConversationId?: string): Promise<boolean> {
     const personas = state.settings?.personas ?? []
     const exists = personas.some((p) => p.id === persona.id)
     const previous = personas.find((item) => item.id === persona.id)
@@ -1992,7 +2023,10 @@ export const actions = {
       version: exists ? (previous?.version ?? 1) + 1 : 1
     })
     const next = exists ? personas.map((p) => (p.id === persona.id ? saved : p)) : [...personas, saved]
-    void actions.updateSettings({ personas: next })
+    if (!(await actions.updateSettings({ personas: next }))) return false
+    return applyToConversationId
+      ? actions.setConversationPersona(applyToConversationId, saved.id)
+      : true
   },
 
   /**
@@ -2216,8 +2250,9 @@ export const actions = {
     )
     const persona = findPersona(state.settings?.personas, personaId)
     if (!override || !persona) return
-    actions.savePersona({ ...persona, ...override, id: persona.id })
-    toast('Scene-specific character changes were promoted to the character library.', 'success')
+    void actions.savePersona({ ...persona, ...override, id: persona.id }).then((saved) => {
+      if (saved) toast('Scene-specific character changes were promoted to the character library.', 'success')
+    })
   },
 
   async saveDirection(id: string, direction: SceneDirection): Promise<void> {
@@ -2287,9 +2322,9 @@ export const actions = {
   },
 
   /** Point a thread at a persona (or clear it). Rebuilds the engine session. */
-  async setConversationPersona(id: string, personaId: string | null): Promise<void> {
+  async setConversationPersona(id: string, personaId: string | null): Promise<boolean> {
     const conv = state.conversations.find((c) => c.id === id)
-    if (!conv) return
+    if (!conv) return false
     const persona = findPersona(state.settings?.personas, personaId)
     const updated = {
       ...conv,
@@ -2298,9 +2333,14 @@ export const actions = {
       updatedAt: now()
     }
     updateConversation(id, () => updated)
-    if (!(await persist(updated))) return
-    await window.sibyl.chat.invalidateSession(id)
+    if (!(await persist(updated))) return false
+    const invalidationError = await invalidateConversation(id)
+    if (invalidationError) {
+      toast(invalidationError, 'error')
+      return false
+    }
     void actions.refreshContextUsage()
+    return true
   },
 
   /** Set (or clear) the writer's own character for a thread. Rebuilds the session. */
@@ -2951,9 +2991,14 @@ export const actions = {
   },
 
   async search(): Promise<void> {
+    const request = ++discoverSearchRequest
     const { query, sort } = state.discover
     setState((s) => ({ discover: { ...s.discover, loading: true, error: null } }))
-    const res = await window.sibyl.hf.search(query, sort)
+    const res = await safeIpc(
+      () => window.sibyl.hf.search(query, sort),
+      'Model search became unavailable.'
+    )
+    if (request !== discoverSearchRequest) return
     setState((s) => ({
       discover: {
         ...s.discover,
@@ -2965,8 +3010,13 @@ export const actions = {
   },
 
   async openModelDetail(repoId: string): Promise<void> {
+    const request = ++discoverDetailRequest
     setState((s) => ({ discover: { ...s.discover, detailLoading: true, selected: null } }))
-    const res = await window.sibyl.hf.modelDetail(repoId)
+    const res = await safeIpc(
+      () => window.sibyl.hf.modelDetail(repoId),
+      'Model details became unavailable.'
+    )
+    if (request !== discoverDetailRequest) return
     setState((s) => ({
       discover: {
         ...s.discover,
@@ -2978,21 +3028,27 @@ export const actions = {
   },
 
   closeModelDetail(): void {
-    setState((s) => ({ discover: { ...s.discover, selected: null } }))
+    ++discoverDetailRequest
+    setState((s) => ({ discover: { ...s.discover, selected: null, detailLoading: false } }))
   },
 
   // --- settings -----------------------------------------------------------
-  async updateSettings(patch: RendererSettingsPatch): Promise<void> {
-    if (!(await flushPendingTextSettings())) return
-    const res = await window.sibyl.settings.set(patch)
+  async updateSettings(patch: RendererSettingsPatch): Promise<boolean> {
+    if (!(await flushPendingTextSettings())) return false
+    const res = await safeIpc(
+      () => window.sibyl.settings.set(patch),
+      'Settings persistence became unavailable.'
+    )
     if (res.ok && res.data) {
       confirmedSettings = res.data
       setState({ settings: res.data })
       if (patch.accent) applyAccentTheme(patch.accent)
       if (patch.accessibility) applyAccessibilitySettings(res.data.accessibility)
       if (patch.tts?.volume !== undefined) ttsPlayer.setVolume(patch.tts.volume)
+      return true
     } else {
       toast(res.error ?? 'Failed to save settings', 'error')
+      return false
     }
   },
 
@@ -3108,7 +3164,7 @@ export const actions = {
     }
     if (ready.assignment) announceVoiceFallback(ready.assignment)
     // Create/resume the AudioContext within this user gesture so audio can start.
-    ttsPlayer.ensureContext()
+    ttsPlayer.prepareForSpeech(messageId)
     const res = await window.sibyl.tts.speak({
       messageId,
       text,
@@ -3129,7 +3185,7 @@ export const actions = {
       toast(state.tts?.error ?? 'Speech is unavailable in this build.', 'info')
       return
     }
-    ttsPlayer.ensureContext()
+    ttsPlayer.prepareForSpeech('__tts_test__')
     const voice = state.installedVoices.find((v) => v.id === voiceId)
     const res = await window.sibyl.tts.speak({
       messageId: '__tts_test__',
@@ -3169,7 +3225,7 @@ export const actions = {
       return false
     }
     if (readiness.assignment) announceVoiceFallback(readiness.assignment)
-    ttsPlayer.ensureContext()
+    ttsPlayer.prepareForSpeech(messageId)
     if (operationId) transitionTurn(operationId, { phase: 'narration-pending' })
     if (sceneRun) {
       updateSceneRun(sceneRun.convId, (run) => setSceneNarration(run, 'pending', messageId))

@@ -59,7 +59,6 @@ interface Props {
  * switcher row hops between saved personas (or starts a new one).
  */
 export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Props) {
-  const dialogRef = useDialogFocus<HTMLDivElement>(onClose)
   const personas = useStore((s) => s.settings?.personas ?? [])
   const installedVoices = useStore((s) => s.installedVoices)
   const conversation = useStore((s) =>
@@ -78,6 +77,9 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
   const [tagDraft, setTagDraft] = useState('')
   const [showDelete, setShowDelete] = useState(false)
   const [replacementId, setReplacementId] = useState('')
+  const [saving, setSaving] = useState(false)
+  const close = (): void => { if (!saving) onClose() }
+  const dialogRef = useDialogFocus<HTMLDivElement>(close)
 
   const set = (patch: Partial<Persona>): void => setDraft((d) => ({ ...d, ...patch }))
   const setName = (name: string): void =>
@@ -102,8 +104,8 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
   // (the library switcher can change `draft` away from the one opened at mount).
   const isSaved = personas.some((p) => p.id === draft.id)
 
-  const commit = (apply: boolean): void => {
-    if (!canSave) return
+  const commit = async (apply: boolean): Promise<void> => {
+    if (!canSave || saving) return
     const persona: Persona = {
       ...draft,
       name: draft.name.trim(),
@@ -119,9 +121,16 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
         ?.filter((relationship) => relationship.personaId && relationship.summary.trim())
         .map((relationship) => ({ ...relationship, summary: relationship.summary.trim() }))
     }
-    actions.savePersona(persona)
-    if (apply && conversationId) void actions.setConversationPersona(conversationId, persona.id)
-    onClose()
+    setSaving(true)
+    try {
+      const saved = await actions.savePersona(
+        persona,
+        apply ? (conversationId ?? undefined) : undefined
+      )
+      if (saved) onClose()
+    } finally {
+      setSaving(false)
+    }
   }
 
   const briefTokens = estimateTokens(draft.brief)
@@ -139,7 +148,7 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
 
   return (
     <div className="no-drag fixed bottom-0 left-0 right-0 top-10 z-40 flex justify-end">
-      <div aria-hidden className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-fade-in" onClick={onClose} />
+      <div aria-hidden className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-fade-in" onClick={close} />
       <div
         ref={dialogRef}
         role="dialog"
@@ -158,7 +167,8 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
           </div>
           <button
             data-dialog-initial-focus
-            onClick={onClose}
+            onClick={close}
+            disabled={saving}
             className="btn-ghost h-8 w-8 p-0"
             aria-label="Close character editor"
           >
@@ -166,6 +176,7 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
           </button>
         </div>
 
+        <fieldset disabled={saving} className="contents">
         {/* library switcher */}
         <div className="border-b border-sibyl-border/60 px-5 py-3.5">
           <div className="eyebrow mb-2.5 text-[10.5px]">Library</div>
@@ -509,19 +520,20 @@ export function PersonaEditor({ initialPersonaId, conversationId, onClose }: Pro
             <span />
           )}
           <div className="flex gap-2">
-            <button onClick={onClose} className="btn-ghost px-3 py-1.5 text-[12.5px]">
+            <button onClick={close} className="btn-ghost px-3 py-1.5 text-[12.5px]">
               Cancel
             </button>
             {conversationId && (
-              <button onClick={() => commit(false)} disabled={!canSave} className="btn-surface px-3 py-1.5 text-[12.5px]">
+              <button onClick={() => void commit(false)} disabled={!canSave || saving} className="btn-surface px-3 py-1.5 text-[12.5px]">
                 Save only
               </button>
             )}
-            <button onClick={() => commit(true)} disabled={!canSave} className="btn-primary px-4 py-1.5 text-[12.5px]">
-              {conversationId ? 'Apply' : 'Save'}
+            <button onClick={() => void commit(true)} disabled={!canSave || saving} className="btn-primary px-4 py-1.5 text-[12.5px]">
+              {saving ? 'Saving…' : conversationId ? 'Apply' : 'Save'}
             </button>
           </div>
         </div>
+        </fieldset>
       </div>
     </div>
   )

@@ -1,0 +1,12 @@
+diff --git a/node_modules/simple-git/dist/index.mjs b/node_modules/simple-git/dist/index.mjs
+--- a/node_modules/simple-git/dist/index.mjs
++++ b/node_modules/simple-git/dist/index.mjs
+@@ -1,6 +1,7 @@
+ import { isPathSpec as D, pathspec as rt, toPaths as yt } from "@simple-git/args-pathspec";
+ import { pathspec as ko } from "@simple-git/args-pathspec";
+-import { exists as ke, FOLDER as _e } from "@kwsites/file-exists";
++import fileExists from "@kwsites/file-exists";
++const { exists: ke, FOLDER: _e } = fileExists;
+ import { spawn as ve } from "node:child_process";
+ import it from "debug";
+ import { createDeferred as Ee, deferred as P } from "@kwsites/promise-deferred";

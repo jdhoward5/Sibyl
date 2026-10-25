@@ -149,8 +149,8 @@ function createWindow(policy: RendererUrlPolicy): void {
   win.once('ready-to-show', () => win.show())
 
   if (isDev) {
-    win.webContents.on('console-message', (_e, _level, message) => {
-      console.log('[renderer]', message)
+    win.webContents.on('console-message', (event) => {
+      console.log('[renderer]', event.message)
     })
     win.webContents.on('did-fail-load', (_e, code, desc, url) => {
       console.log('[did-fail-load]', code, desc, url)

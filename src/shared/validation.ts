@@ -690,7 +690,10 @@ export function parseConversation(value: unknown): Conversation {
   for (const direction of directions ?? []) {
     if (
       direction.target.kind === 'speaker' &&
-      (!cast || !cast.includes(direction.target.speakerId))
+      (!cast || !cast.includes(direction.target.speakerId)) &&
+      // Cast removal preserves retired guidance and its linked transcript note.
+      // Both flags are required so historical targets can never become active.
+      (direction.enabled || !direction.resolvedAt)
     ) {
       invalid(`${path}.directions`, 'target speaker must be in the cast')
     }

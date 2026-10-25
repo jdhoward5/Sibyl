@@ -1,7 +1,7 @@
 import { actions, useStore } from '../../store'
 import { descriptorTags, formatBytes, isNsfwModel, parseParamLabel, quantRank } from '@shared/format'
+import { canonicalGgufFilename, groupGgufFiles, type GgufDownloadGroup } from '@shared/modelFiles'
 import { XIcon, DownloadIcon, CheckIcon, HeartIcon, ExternalLinkIcon } from '../../lib/icons'
-import type { HFGGUFFile } from '@shared/types'
 import { useDialogFocus } from '../../lib/useDialogFocus'
 
 function recommendationFor(quant: string | undefined): string | null {
@@ -24,7 +24,7 @@ export function ModelDetailDrawer() {
   if (!loading && !detail) return null
 
   const sortedFiles = detail
-    ? [...detail.ggufFiles].sort((a, b) => quantRank(b.quant) - quantRank(a.quant))
+    ? groupGgufFiles(detail.ggufFiles).sort((a, b) => quantRank(b.quant) - quantRank(a.quant))
     : []
 
   return (
@@ -102,7 +102,7 @@ export function ModelDetailDrawer() {
               </h3>
               {sortedFiles.length === 0 && (
                 <p className="text-[13px] text-sibyl-muted">
-                  No single-file GGUF quantizations found in this repo.
+                  No GGUF quantizations found in this repo.
                 </p>
               )}
               <div className="flex flex-col gap-2">
@@ -136,14 +136,16 @@ function FileRow({
   downloads,
   installed
 }: {
-  file: HFGGUFFile
+  file: GgufDownloadGroup
   repoId: string
   downloads: Record<string, { id: string; filename: string; status: string }>
   installed: { repoId: string; filename: string }[]
 }) {
   const id = `${repoId}/${file.rfilename}`.replace(/[^a-zA-Z0-9._/-]/g, '_')
   const dl = downloads[id]
-  const isInstalled = installed.some((m) => m.repoId === repoId && m.filename === file.rfilename)
+  const isInstalled = installed.some(
+    (m) => m.repoId === repoId && canonicalGgufFilename(m.filename) === file.rfilename
+  )
   const busy = dl && (dl.status === 'downloading' || dl.status === 'queued' || dl.status === 'verifying')
   const rec = recommendationFor(file.quant)
 
@@ -152,7 +154,7 @@ function FileRow({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="font-mono text-[12px] font-semibold text-sibyl-text">{file.quant ?? 'GGUF'}</span>
-          {file.multipart && <span className="chip">multi-part</span>}
+          {file.multipart && <span className="chip">{file.shardCount} parts</span>}
         </div>
         <div className="truncate text-[11px] text-sibyl-muted" title={file.rfilename}>
           {file.rfilename}
@@ -166,6 +168,8 @@ function FileRow({
         </span>
       ) : busy ? (
         <span className="shrink-0 text-[12px] text-sibyl-accent">Downloading…</span>
+      ) : !file.complete ? (
+        <span className="shrink-0 text-[12px] text-sibyl-muted">Missing parts</span>
       ) : (
         <button
           onClick={() => actions.startDownload(repoId, file.rfilename)}

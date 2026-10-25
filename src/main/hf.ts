@@ -203,7 +203,7 @@ export interface RepoFileInfo {
 }
 
 /**
- * Map of GGUF **basename → {size, sha256}** for a repo, from HF's tree API. Used
+ * Map of GGUF **repository-relative path → {size, sha256}** from HF's tree API. Used
  * to pre-flight disk space and to verify finished downloads. Returns an empty map
  * on any failure (network/parse/missing) so callers degrade gracefully — never
  * blocking a download on a flaky metadata call.
@@ -213,8 +213,7 @@ export async function getRepoGgufFiles(repoId: string): Promise<Map<string, Repo
   const entries = await fetchTree(repoId)
   for (const e of entries) {
     if (e.type !== 'file' || !e.path.toLowerCase().endsWith('.gguf')) continue
-    const base = e.path.split('/').pop()
-    if (base) map.set(base, { size: e.lfs?.size ?? e.size ?? 0, sha256: e.lfs?.oid?.toLowerCase() })
+    map.set(e.path, { size: e.lfs?.size ?? e.size ?? 0, sha256: e.lfs?.oid?.toLowerCase() })
   }
   return map
 }

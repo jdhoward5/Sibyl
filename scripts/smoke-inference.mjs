@@ -50,23 +50,19 @@ async function main() {
   const session = new LlamaChatSession({ contextSequence: context.getSequence() })
 
   const prompt = 'In one short sentence, introduce yourself as Sibyl, a local AI assistant.'
-  log('Prompt:', prompt)
-  process.stdout.write('[smoke] response: ')
 
   const start = Date.now()
   let tokenChunks = 0
   const response = await session.prompt(prompt, {
     temperature: 0.7,
     maxTokens: 120,
-    onTextChunk: (chunk) => {
+    onTextChunk: () => {
       tokenChunks++
-      process.stdout.write(chunk)
     }
   })
   const seconds = (Date.now() - start) / 1000
   const tokenCount = model.tokenize(response).length
 
-  console.log('\n')
   log('--- RESULT ---')
   log('GPU:', llama.gpu)
   log('chunks streamed:', tokenChunks)

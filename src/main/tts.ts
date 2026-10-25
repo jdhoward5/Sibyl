@@ -70,6 +70,11 @@ interface VoiceDownloadJob {
   progress: TtsVoiceDownload
 }
 
+interface SpeechRequest {
+  id: string
+  abort: AbortController
+}
+
 const MAX_TTS_MODEL_BYTES = 200 * 1024 * 1024
 const MAX_TTS_CONFIG_BYTES = 1024 * 1024
 const MAX_CACHED_VOICES = 2
@@ -82,7 +87,7 @@ const MAX_CACHED_VOICE_BYTES = 140 * 1024 * 1024
  * and inference remains strictly serialized. Speech never leaves the machine;
  * like the LLM engine, nothing here is logged that could carry message content.
  */
-class TtsEngine extends EventEmitter {
+export class TtsEngine extends EventEmitter {
   private available: boolean | null = null
   private availabilityError: string | undefined
   /** Small LRU: enough for a two-character scene without unbounded ONNX memory. */
@@ -93,8 +98,10 @@ class TtsEngine extends EventEmitter {
 
   // The active speak request. Serialized through `queue` so two requests never
   // run the model concurrently (which could dispose a session mid-inference).
-  private current: { id: string; abort: AbortController } | null = null
+  private current: SpeechRequest | null = null
+  private pending: SpeechRequest | null = null
   private queue: Promise<void> = Promise.resolve()
+  private disposing: Promise<void> | null = null
 
   private downloads = new Map<string, VoiceDownloadJob>()
 
@@ -256,17 +263,18 @@ class TtsEngine extends EventEmitter {
   /** Remove a downloaded voice's files and registry entry. */
   async deleteVoice(voiceId: string): Promise<void> {
     this.stop()
-    await this.queue
-    await this.releaseVoice(voiceId)
-    // Delete the exact files the registry recorded (absolute paths we wrote from
-    // a catalog id) rather than reconstructing a path from the caller-supplied id —
-    // a no-match id removes nothing instead of risking a path outside the voices dir.
-    const removed = await removeInstalledVoice(voiceId)
-    if (removed) {
-      await Promise.all(
-        [removed.modelPath, removed.configPath].map((f) => fs.rm(f, { force: true }).catch(() => {}))
-      )
-    }
+    await this.enqueue(async () => {
+      await this.releaseVoice(voiceId)
+      // Delete the exact files the registry recorded (absolute paths we wrote from
+      // a catalog id) rather than reconstructing a path from the caller-supplied id —
+      // a no-match id removes nothing instead of risking a path outside the voices dir.
+      const removed = await removeInstalledVoice(voiceId)
+      if (removed) {
+        await Promise.all(
+          [removed.modelPath, removed.configPath].map((f) => fs.rm(f, { force: true }).catch(() => {}))
+        )
+      }
+    })
   }
 
   // -- synthesis ------------------------------------------------------------
@@ -341,11 +349,17 @@ class TtsEngine extends EventEmitter {
   }
 
   /** Synthesize one already-phonemized sentence into mono Float32 PCM. */
-  private async synthesizePhonemes(lv: LoadedVoice, phonemeStr: string, rate: number): Promise<Float32Array> {
+  private async synthesizePhonemes(
+    lv: LoadedVoice,
+    phonemeStr: string,
+    rate: number,
+    signal: AbortSignal
+  ): Promise<Float32Array> {
     const ids = phonemesToIds(splitPhonemes(phonemeStr), lv.config.phoneme_id_map)
     if (ids.length === 0) return new Float32Array(0)
 
     const ort = await getOrt()
+    signal.throwIfAborted()
     const inf = lv.config.inference ?? { noise_scale: 0.667, length_scale: 1, noise_w: 0.8 }
     // rate > 1 ⇒ faster speech ⇒ smaller length_scale.
     const lengthScale = inf.length_scale / (rate > 0 ? rate : 1)
@@ -375,59 +389,68 @@ class TtsEngine extends EventEmitter {
    * previous one and waits for it to unwind before running the model.
    */
   speak(messageId: string, text: string, opts?: { voiceId?: string; rate?: number }): Promise<void> {
-    // Signal any in-flight request to stop, then chain behind it so the model is
-    // never run by two requests at once.
-    this.current?.abort.abort()
-    const run = this.queue.then(() => this.runSpeak(messageId, text, opts))
+    if (this.disposing) return Promise.resolve()
+    // Cancellation belongs to the request from the moment it is queued. A stop
+    // or newer request must also invalidate work that has not started yet.
+    this.stop()
+    const request: SpeechRequest = { id: randomUUID(), abort: new AbortController() }
+    this.pending = request
+    return this.enqueue(async () => {
+      if (this.pending === request) this.pending = null
+      if (request.abort.signal.aborted) return
+      await this.runSpeak(request, messageId, text, opts)
+    })
+  }
+
+  private enqueue(operation: () => Promise<void>): Promise<void> {
+    const run = this.queue.then(operation)
     this.queue = run.catch(() => {})
     return run
   }
 
   private async runSpeak(
+    request: SpeechRequest,
     messageId: string,
     text: string,
     opts?: { voiceId?: string; rate?: number }
   ): Promise<void> {
-    const requestId = randomUUID()
-    const abort = new AbortController()
-    this.current = { id: requestId, abort }
+    const { id: requestId, abort } = request
+    this.current = request
 
     try {
-      if (!(await this.probeAvailability())) {
+      const available = await this.probeAvailability()
+      abort.signal.throwIfAborted()
+      if (!available) {
         throw new Error(this.availabilityError ?? 'Speech unavailable.')
       }
       const settings = await getSettings()
+      abort.signal.throwIfAborted()
       const voiceId = opts?.voiceId ?? settings.tts.voiceId
       const rate = opts?.rate ?? settings.tts.rate ?? 1
       const voice = voiceId ? await getInstalledVoice(voiceId) : null
+      abort.signal.throwIfAborted()
       if (!voice) {
         throw new Error('No voice is installed. Add one in Settings.')
       }
-      if (abort.signal.aborted) {
-        this.emitEvent({ type: 'done', requestId, messageId })
-        return
-      }
-
       this.speakingMessageId = messageId
       this.synthesizing = true
       void this.emitStatus()
 
       const lv = await this.loadVoice(voice)
-      if (abort.signal.aborted) {
-        this.emitEvent({ type: 'done', requestId, messageId })
-        return
-      }
+      abort.signal.throwIfAborted()
       this.emitEvent({ type: 'start', requestId, messageId, sampleRate: lv.sampleRate })
+      abort.signal.throwIfAborted()
 
       const spoken = plainTextForSpeech(text)
       if (spoken.trim()) {
         const phonemize = await getPhonemize()
+        abort.signal.throwIfAborted()
         const espeakVoice = lv.config.espeak?.voice ?? 'en-us'
         const sentences = await phonemize(spoken, espeakVoice)
         let seq = 0
         for (const sentence of sentences) {
           if (abort.signal.aborted) break
-          const pcm = await this.synthesizePhonemes(lv, sentence, rate)
+          const pcm = await this.synthesizePhonemes(lv, sentence, rate, abort.signal)
           if (abort.signal.aborted) break
           if (pcm.length > 0) {
             this.emitEvent({
@@ -464,21 +487,23 @@ class TtsEngine extends EventEmitter {
     }
   }
 
-  /** Stop the current request (if any). The in-flight runSpeak unwinds gracefully. */
+  /** Cancel active and queued speech. An active native call unwinds before reuse. */
   stop(): void {
     this.current?.abort.abort()
+    this.pending?.abort.abort()
+    this.pending = null
   }
 
   /** Full teardown for app exit: stop speech, cancel downloads, release the session. */
-  async dispose(): Promise<void> {
+  dispose(): Promise<void> {
+    if (this.disposing) return this.disposing
     this.stop()
     for (const job of this.downloads.values()) job.controller.abort()
-    try {
-      await this.queue
-    } catch {
-      /* ignore */
-    }
-    await this.releaseSessions()
+    const disposal = this.enqueue(() => this.releaseSessions()).finally(() => {
+      if (this.disposing === disposal) this.disposing = null
+    })
+    this.disposing = disposal
+    return disposal
   }
 }
 
