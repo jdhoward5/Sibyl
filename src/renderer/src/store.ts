@@ -33,7 +33,6 @@ import type { PortableBundlePreview } from '@shared/portable'
 import type { InstalledVoice, TtsSettings, TtsStatus, TtsVoiceDownload } from '@shared/tts'
 import { getAccentTheme, hexToRgbChannels } from '@shared/themes'
 import { contextUsageIsCurrent } from '@shared/context'
-import { estimateModelFit } from '@shared/hardwareFit'
 import {
   beginRendererTurn,
   IDLE_RENDERER_TURN,
@@ -2894,25 +2893,13 @@ export const actions = {
   },
 
   async loadModel(id: string): Promise<void> {
-    const infoRes = await window.sibyl.app.info()
-    if (infoRes.ok && infoRes.data) setState({ appInfo: infoRes.data })
     const model = state.installedModels.find((candidate) => candidate.id === id)
-    const settings = state.settings
-    const appInfo = infoRes.data ?? state.appInfo
-    if (model && settings && appInfo) {
-      const fit = estimateModelFit({
-        model,
-        contextSize: settings.load.contextSize,
-        gpuLayers: settings.load.gpuLayers,
-        gpuEnabled: settings.gpu !== 'cpu' && state.engine.gpuType !== false && settings.load.gpuLayers !== 0,
-        resources: {
-          systemMemoryTotalBytes: appInfo.systemMemoryTotalBytes,
-          systemMemoryFreeBytes: appInfo.systemMemoryFreeBytes,
-          vramTotalBytes: state.engine.vramTotalBytes,
-          vramUsedBytes: state.engine.vramUsedBytes,
-          unifiedMemory: state.hardware?.unifiedMemory ?? appInfo.platform === 'darwin'
-        }
-      })
+    // A queued estimate must not delay load() interrupting an active prompt.
+    const fit = state.engine.state === 'generating' ? null
+      : await window.sibyl.engine.estimateModelFit(id)
+        .then((result) => result.ok ? result.data : null)
+        .catch(() => null)
+    if (fit) {
       if (
         fit.severity === 'infeasible' &&
         !window.confirm(

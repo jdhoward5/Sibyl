@@ -39,6 +39,7 @@ import {
 } from '@shared/sceneDirector'
 import { getLlamaInstance } from './llama'
 import { readHardware } from './hardware'
+import { estimateInstalledModelFit, modelFitContextSize } from './modelFit'
 import { getInstalledModel, getSettings, upsertInstalledModel } from './store'
 import { SerialQueue } from '@shared/serial'
 
@@ -215,6 +216,19 @@ export class InferenceEngine extends EventEmitter {
     }
   }
 
+  async estimateModelFit(modelId: string) {
+    return this.lifecycle.run(async () => {
+      if (this.shutdownRequested) throw new Error('The inference engine is shutting down.')
+      const [installed, settings] = await Promise.all([getInstalledModel(modelId), getSettings()])
+      if (!installed) throw new Error('Model not found.')
+      // Probing must never dispose the backend underneath a loaded model.
+      const llama = this.model && this.llama ? this.llama : await getLlamaInstance(settings.gpu)
+      this.llama = llama
+      const hardware = await readHardware(async () => llama)
+      return estimateInstalledModelFit(installed, settings, hardware, llama)
+    })
+  }
+
   private async setState(state: EngineStatus['state'], error?: string): Promise<void> {
     this.state = state
     this.lastError = error
@@ -277,9 +291,16 @@ export class InferenceEngine extends EventEmitter {
         if (request !== this.loadRequestSequence) throw new Error('Model load was superseded.')
         const llama = await getLlamaInstance(settings.gpu)
         if (request !== this.loadRequestSequence) throw new Error('Model load was superseded.')
+        const plannedContext = settings.load.gpuLayers < 0
+          ? await modelFitContextSize(installed, settings.load.contextSize, llama)
+          : settings.load.contextSize
+        if (request !== this.loadRequestSequence) throw new Error('Model load was superseded.')
         model = await llama.loadModel({
           modelPath: installed.path,
-          gpuLayers: settings.load.gpuLayers < 0 ? undefined : settings.load.gpuLayers
+          gpuLayers: settings.load.gpuLayers < 0
+            ? { fitContext: { contextSize: plannedContext } }
+            : settings.load.gpuLayers,
+          defaultContextFlashAttention: true
         })
         if (request !== this.loadRequestSequence) throw new Error('Model load was superseded.')
 

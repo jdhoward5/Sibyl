@@ -40,6 +40,7 @@ const bridge: SibylBridge = {
     locate: (id) => ipcRenderer.invoke(IPC.modelsLocate, id)
   },
   engine: {
+    estimateModelFit: (modelId) => ipcRenderer.invoke(IPC.engineEstimateModelFit, modelId),
     load: (modelId) => ipcRenderer.invoke(IPC.engineLoad, modelId),
     unload: () => ipcRenderer.invoke(IPC.engineUnload),
     status: () => ipcRenderer.invoke(IPC.engineStatus),

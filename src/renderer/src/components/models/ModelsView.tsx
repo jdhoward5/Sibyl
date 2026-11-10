@@ -13,7 +13,7 @@ export function ModelsView() {
   const [tab, setTab] = useState<ModelsTab>('installed')
   const models = useStore((state) => state.installedModels)
   const engine = useStore((state) => state.engine)
-  const { fitFor, parameters } = useModelFit()
+  const { fitFor, parameters } = useModelFit(true)
   const totalBytes = models.reduce((sum, model) => sum + model.sizeBytes, 0)
 
   return (

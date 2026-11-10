@@ -70,7 +70,7 @@ export function HardwarePanel() {
               : 'System RAM and GPU VRAM are separate budgets. '}
               Free RAM is an OS snapshot and can exclude reclaimable caches. Fit hints use total capacity with a reserve of 20% RAM (at least 4 GiB) and 10% GPU memory (at least 0.5 GiB), so an already loaded model does not skew recommendations.
             </p>
-            <p className="mt-2 leading-relaxed">Search previews assume roughly 0.65 bytes per parameter for Q4 weights. File details use the full download size plus runtime and context overhead. Auto offload assumes all layers fit on the GPU; partial CPU offload may allow larger models at lower speed. These are estimates, not compatibility or speed guarantees.</p>
+            <p className="mt-2 leading-relaxed">Search previews assume roughly 0.65 bytes per parameter for Q4 weights and grouped-query attention with a quarter-size cache. Download estimates infer context memory from parameter count; installed models use their GGUF tensors and architecture when available. Auto offload uses the GPU budget and places remaining layers in RAM, which can substantially reduce speed. Recommendations favor models that fit fully on the GPU. These are estimates, not compatibility or speed guarantees.</p>
           </details>
         </>
       )}

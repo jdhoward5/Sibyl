@@ -25,6 +25,7 @@ import type {
   UpdateStatus
 } from './types'
 import type { ExportFormat } from './export'
+import type { ModelFitEstimate } from './hardwareFit'
 import type { PortableBundlePreview } from './portable'
 import type { InstalledVoice, TtsEvent, TtsStatus, TtsVoiceDownload } from './tts'
 
@@ -52,6 +53,7 @@ export const IPC = {
   engineLoad: 'engine:load',
   engineUnload: 'engine:unload',
   engineStatus: 'engine:status',
+  engineEstimateModelFit: 'engine:estimateModelFit',
   engineStatusEvent: 'engine:statusEvent', // main → renderer event
 
   // Chat
@@ -208,6 +210,7 @@ export interface SibylBridge {
     locate(id: string): Promise<Result<InstalledModel | null>>
   }
   engine: {
+    estimateModelFit(modelId: string): Promise<Result<ModelFitEstimate>>
     load(modelId: string): Promise<Result<EngineStatus>>
     unload(): Promise<Result<void>>
     status(): Promise<Result<EngineStatus>>

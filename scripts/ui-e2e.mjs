@@ -760,6 +760,12 @@ async function run() {
       'local model registered in place (local:true, path = chosen file)'
     )
     assert(imported.quant === 'Q4_K_M' && imported.paramLabel === '8B', 'parsed quant + param from filename')
+    const fit = await page.evaluate((id) => window.sibyl.engine.estimateModelFit(id), imported.id)
+    assert(fit.ok && Number.isFinite(fit.data?.estimatedRamBytes), 'model memory estimate crosses the real typed IPC bridge')
+    assert(fit.data.details.some((line) => line.includes('less precise parameter-count estimate')),
+      'invalid GGUF headers fall back to an explicitly approximate estimate')
+    const missingFit = await page.evaluate(() => window.sibyl.engine.estimateModelFit('missing-model'))
+    assert(!missingFit.ok && missingFit.error === 'Model not found.', 'unknown model estimates return a structured error')
     await shot('06-import.png')
     // Deleting a local model must deregister it but NEVER delete the user's file.
     await page.evaluate((id) => window.sibyl.models.delete(id), imported.id)

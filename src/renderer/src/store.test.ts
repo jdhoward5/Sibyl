@@ -16,6 +16,7 @@ import { activeDirectionsForSpeaker, snapshotPersona } from '@shared/roleplay'
 import { buildBeatPrompt } from '@shared/scene'
 import { createSceneRun, setSceneNarration } from '@shared/sceneRun'
 import { parseConversation } from '@shared/validation'
+import { estimateModelFit } from '@shared/hardwareFit'
 
 vi.mock('./lib/ttsPlayer', () => ({
   ttsPlayer: {
@@ -103,6 +104,7 @@ const bridge = {
   conversations: { save: vi.fn<(value: Conversation) => Promise<Result<void>>>() },
   chat: { invalidateSession: vi.fn() },
   hf: { search: vi.fn(), modelDetail: vi.fn() },
+  engine: { estimateModelFit: vi.fn(), load: vi.fn() },
   tts: { speak: vi.fn() }
 }
 
@@ -127,6 +129,39 @@ beforeEach(async () => {
   })
   bridge.chat.invalidateSession.mockResolvedValue({ ok: true })
   bridge.tts.speak.mockResolvedValue({ ok: true })
+  bridge.engine.load.mockResolvedValue({ ok: false, error: 'Synthetic load result' })
+})
+
+describe('model load memory preflight', () => {
+  it('uses the main-process estimate for an over-budget warning', async () => {
+    const gib = 1024 ** 3
+    const fit = estimateModelFit({
+      model: { sizeBytes: 80 * gib }, contextSize: 4096, gpuLayers: 0, gpuEnabled: false,
+      memoryMode: 'capacity', resources: {
+        systemMemoryTotalBytes: 16 * gib, systemMemoryFreeBytes: 8 * gib,
+        vramTotalBytes: null, vramUsedBytes: null
+      }
+    })
+    const confirm = vi.fn(() => false)
+    Object.assign(window, { confirm })
+    bridge.engine.estimateModelFit.mockResolvedValueOnce({ ok: true, data: fit })
+    await actions.loadModel('model-a')
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Over the memory budget'))
+    expect(bridge.engine.load).not.toHaveBeenCalled()
+  })
+
+  it('does not queue a preflight ahead of interrupting active generation', async () => {
+    Object.assign(getState().engine, { state: 'generating' })
+    await actions.loadModel('model-a')
+    expect(bridge.engine.estimateModelFit).not.toHaveBeenCalled()
+    expect(bridge.engine.load).toHaveBeenCalledWith('model-a')
+  })
+
+  it('still allows loading when the estimate is unavailable', async () => {
+    bridge.engine.estimateModelFit.mockRejectedValueOnce(new Error('Unavailable'))
+    await actions.loadModel('model-a')
+    expect(bridge.engine.load).toHaveBeenCalledWith('model-a')
+  })
 })
 
 afterEach(() => {

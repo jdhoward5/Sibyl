@@ -23,7 +23,7 @@ export function ModelFitHint({ fit, preview = false, unified = false }: {
   return (
     <span className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]" title={fit?.details.join('\n')}>
       <span className={`rounded border px-2 py-0.5 font-medium ${colors[severity]}`}>
-        {labels[severity]}
+        {fit?.usesCpuOffload && severity === 'tight' ? 'CPU offload' : labels[severity]}
       </span>
       <span className="text-sibyl-secondary">
         {preview && 'Q4 preview · '}

@@ -393,6 +393,7 @@ export function registerIpc(policy: RendererUrlPolicy): void {
   })
 
   // --- Engine -------------------------------------------------------------
+  handle(IPC.engineEstimateModelFit, policy, (args) => parseArgs<[string]>(args, (v) => parseModelId(v)), async (_e, modelId) => engine.estimateModelFit(modelId))
   handle(IPC.engineLoad, policy, (args) => parseArgs<[string]>(args, (v) => parseModelId(v)), async (_e, modelId) => engine.load(modelId))
   handle(IPC.engineUnload, policy, parseNoArgs, async () => {
     await engine.unload()

@@ -366,6 +366,7 @@ describe('InferenceEngine lifecycle', () => {
     fakes.sessions.length = 0
     fakes.llama.loadModel.mockReset()
     fakes.settings.load.contextSize = 2048
+    fakes.settings.load.gpuLayers = -1
     fakes.settings.load.systemPrompt = 'test'
     fakes.settings.generation.maxTokens = 256
     fakes.settings.context.keepRecentMessages = 12
@@ -373,6 +374,33 @@ describe('InferenceEngine lifecycle', () => {
     fakes.settings.context.compactTargetFraction = 0.5
     fakes.settings.context.compactRunwayTurns = 3
     fakes.settings.personas = []
+  })
+
+  it('reserves the selected context and flash attention during automatic model loading', async () => {
+    fakes.installed.set('model-a', { ...model('model-a'), trainContextLength: 1024 })
+    fakes.llama.loadModel.mockResolvedValueOnce(nativeModel().value)
+    const engine = new InferenceEngine()
+    await engine.load('model-a')
+    expect(fakes.llama.loadModel).toHaveBeenCalledWith({
+      modelPath: 'C:/models/model-a.gguf',
+      gpuLayers: { fitContext: { contextSize: 1024 } },
+      defaultContextFlashAttention: true
+    })
+    await engine.unload()
+  })
+
+  it('estimates memory without loading a model or disposing the active context', async () => {
+    const engine = new InferenceEngine()
+    await engine.estimateModelFit('model-a')
+    expect(fakes.llama.loadModel).not.toHaveBeenCalled()
+    const native = nativeModel()
+    fakes.llama.loadModel.mockResolvedValueOnce(native.value)
+    await engine.load('model-a')
+    await engine.estimateModelFit('model-b')
+    expect((await engine.status()).modelId).toBe('model-a')
+    expect(native.context.dispose).not.toHaveBeenCalled()
+    expect(fakes.llama.loadModel).toHaveBeenCalledTimes(1)
+    await engine.unload()
   })
 
   it('lets the newest concurrent load win and disposes the stale resources', async () => {
