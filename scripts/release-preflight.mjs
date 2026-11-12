@@ -114,10 +114,15 @@ const patchedAddon = readFileSync(
   ),
   'utf8'
 )
+const patchedInsights = readFileSync(
+  path.join(root, 'node_modules', 'node-llama-cpp', 'dist', 'gguf', 'insights', 'GgufInsights.js'),
+  'utf8'
+)
 if (
   !patchedCmake.includes('target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_17)') ||
   !patchedCmake.includes('target_link_libraries(${PROJECT_NAME} "llama-common")') ||
-  !patchedAddon.includes('common_cpu_get_num_math()')
+  !patchedAddon.includes('common_cpu_get_num_math()') ||
+  !patchedInsights.includes('const gemma4SwaPattern = architecture === "gemma4"')
 ) {
   throw new Error('The node-llama-cpp b9616 compatibility patch is not applied.')
 }

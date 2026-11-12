@@ -1,3 +1,63 @@
+diff --git a/node_modules/node-llama-cpp/dist/gguf/insights/GgufInsights.js b/node_modules/node-llama-cpp/dist/gguf/insights/GgufInsights.js
+index ba70f7a..252a780 100644
+--- a/node_modules/node-llama-cpp/dist/gguf/insights/GgufInsights.js
++++ b/node_modules/node-llama-cpp/dist/gguf/insights/GgufInsights.js
+@@ -212,6 +212,12 @@ export class GgufInsights {
+         const usingGpu = finalModelGpuLayers !== 0;
+         const { gpuKVCacheSize, cpuKVCacheSize, gpuRecurrentStateSize, cpuRecurrentStateSize } = this._estimateContextCacheMemorySplitInBytes({
+             kvSize,
++            fullKvSize: actualContextSize,
++            swaKvSize: usingSWA
++                // b9616 pads each stream to 256 cells. The addon uses the
++                // full batch, including LlamaContext's extra SWA edge token.
++                ? sequences * ggmlPad(Math.min(padSafeContextSize(contextSize, "up"), slidingWindow + batchSize + 1), 256)
++                : actualContextSize,
+             sequences,
+             totalFileLayers,
+             finalModelGpuLayers,
+@@ -443,7 +449,7 @@ export class GgufInsights {
+     _getFileLayers() {
+         return this._ggufFileInfo.architectureMetadata.block_count ?? this._determineNumberOfLayersFromTensorInfo();
+     }
+-    _estimateContextCacheMemorySplitInBytes({ kvSize, sequences, totalFileLayers, finalModelGpuLayers, usingGpu, kvCacheKeyType = GgmlType.F16, kvCacheValueType = GgmlType.F16 }) {
++    _estimateContextCacheMemorySplitInBytes({ kvSize, fullKvSize = kvSize, swaKvSize = kvSize, sequences, totalFileLayers, finalModelGpuLayers, usingGpu, kvCacheKeyType = GgmlType.F16, kvCacheValueType = GgmlType.F16 }) {
+         // source: `llama_kv_cache_init` in `llama.cpp`
+         const architecture = this._ggufFileInfo.metadata.general?.architecture;
+         const nHead = this._ggufFileInfo.architectureMetadata.attention?.head_count ?? 0;
+@@ -451,6 +457,16 @@ export class GgufInsights {
+         const nEmbdHeadK = this._ggufFileInfo.architectureMetadata.attention?.key_length ?? ((nHead == 0) ? 0 : (nEmbd / nHead));
+         const nHeadKv = this._ggufFileInfo.architectureMetadata.attention?.head_count_kv ?? nHead;
+         const nEmbdHeadV = this._ggufFileInfo.architectureMetadata.attention?.value_length ?? ((nHead == 0) ? 0 : nEmbd / nHead);
++        // Gemma 4 uses explicit per-layer SWA flags and different head dimensions
++        // for sliding and global attention. Averaging the cache across layers
++        // can reject a model that comfortably fits, before native allocation.
++        const attention = this._ggufFileInfo.architectureMetadata.attention;
++        const gemma4SwaPattern = architecture === "gemma4" &&
++            Array.isArray(attention?.sliding_window_pattern) &&
++            attention.sliding_window_pattern.length === totalFileLayers &&
++            attention.sliding_window_pattern.every((value) => typeof value === "boolean")
++            ? attention.sliding_window_pattern
++            : undefined;
+         const keyTypeSize = this._llama._bindings.getTypeSizeForGgmlType(kvCacheKeyType) ?? this._llama._consts.ggmlTypeF16Size;
+         const valueTypeSize = this._llama._bindings.getTypeSizeForGgmlType(kvCacheValueType) ?? this._llama._consts.ggmlTypeF16Size;
+         // source: `llama_model::load_tensors` in `llama-model.cpp`
+@@ -476,8 +492,14 @@ export class GgufInsights {
+             }
+             else {
+                 const nHeadKvLayer = resolveLayerHeadCountKv(nHeadKv, i, nHead);
+-                const layerElementsK = nEmbdHeadK * nHeadKvLayer * kvSize;
+-                const layerElementsV = nEmbdHeadV * nHeadKvLayer * kvSize;
++                const isSlidingLayer = gemma4SwaPattern?.[i] === true;
++                const layerKvSize = gemma4SwaPattern != null
++                    ? (isSlidingLayer ? swaKvSize : fullKvSize)
++                    : kvSize;
++                const layerHeadK = isSlidingLayer ? (attention.key_length_swa ?? nEmbdHeadK) : nEmbdHeadK;
++                const layerHeadV = isSlidingLayer ? (attention.value_length_swa ?? nEmbdHeadV) : nEmbdHeadV;
++                const layerElementsK = layerHeadK * nHeadKvLayer * layerKvSize;
++                const layerElementsV = layerHeadV * nHeadKvLayer * layerKvSize;
+                 if (isGpuLayer) {
+                     gpuKvElementsK += layerElementsK;
+                     gpuKvElementsV += layerElementsV;
 diff --git a/node_modules/node-llama-cpp/llama/CMakeLists.txt b/node_modules/node-llama-cpp/llama/CMakeLists.txt
 index efd8fce..dc619be 100644
 --- a/node_modules/node-llama-cpp/llama/CMakeLists.txt
